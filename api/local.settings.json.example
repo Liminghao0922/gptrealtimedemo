@@ -1,0 +1,9 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AOAI_ENDPOINT": "https://<your-aoai-resource>.openai.azure.com",
+    "AOAI_REALTIME_DEPLOYMENT": "<your-realtime-deployment-name>"
+  }
+}

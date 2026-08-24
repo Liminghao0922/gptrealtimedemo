@@ -1,0 +1,5 @@
+api/.venv/
+api/__pycache__/
+api/local.settings.json
+*.py[cod]
+.azure/*
