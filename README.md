@@ -51,7 +51,8 @@ Update `api/local.settings.json`:
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
     "FUNCTIONS_WORKER_RUNTIME": "python",
     "AOAI_ENDPOINT": "https://aoai-realtime-test01.openai.azure.com/",
-    "AOAI_REALTIME_DEPLOYMENT": "gpt-realtime-2.1-mini"
+    "AOAI_REALTIME_DEPLOYMENT": "gpt-realtime-2.1-mini",
+    "AOAI_API_KEY": "<optional-azure-openai-api-key>"
   }
 }
 ```
@@ -136,6 +137,6 @@ The deployment creates a user-assigned managed identity and assigns it the **Cog
 
 The person or deployment pipeline assigning that role also needs permission to create Azure role assignments, such as **Role Based Access Control Administrator** at the appropriate scope.
 
-Do not place an Azure OpenAI API key in browser code or application settings. The Function uses `DefaultAzureCredential`: Azure CLI credentials locally and managed identity in Azure.
+Do not place an Azure OpenAI API key in browser code. When `AOAI_API_KEY` is configured as a Function App application setting, the Function uses it only for server-side Azure OpenAI requests. Otherwise, it uses `DefaultAzureCredential`: Azure CLI credentials locally and managed identity in Azure.
 
 When hosting the web application separately, configure the Function App CORS allowlist with the web application's exact origin.

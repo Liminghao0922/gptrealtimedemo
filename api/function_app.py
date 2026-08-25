@@ -16,6 +16,19 @@ def _trim_end_slash(url: str) -> str:
     return url[:-1] if url.endswith("/") else url
 
 
+def _get_aoai_auth_headers() -> dict[str, str] | None:
+    api_key = os.getenv("AOAI_API_KEY")
+    if api_key:
+        return {"api-key": api_key}
+
+    try:
+        aad_token = credential.get_token(COGNITIVE_SCOPE).token
+    except Exception:
+        return None
+
+    return {"Authorization": f"Bearer {aad_token}"}
+
+
 @app.route(route="realtime-access", methods=["POST"], auth_level=func.AuthLevel.FUNCTION)
 def realtime_access(req: func.HttpRequest) -> func.HttpResponse:
     endpoint = os.getenv("AOAI_ENDPOINT")
@@ -50,11 +63,14 @@ def realtime_access(req: func.HttpRequest) -> func.HttpResponse:
     if isinstance(instructions, str) and instructions.strip():
         session_config["instructions"] = instructions
 
-    try:
-        aad_token = credential.get_token(COGNITIVE_SCOPE).token
-    except Exception:
+    auth_headers = _get_aoai_auth_headers()
+    if auth_headers is None:
         return func.HttpResponse(
-            json.dumps({"error": "Failed to acquire managed identity token"}),
+            json.dumps(
+                {
+                    "error": "Failed to authenticate with Azure OpenAI. Configure AOAI_API_KEY or managed identity."
+                }
+            ),
             status_code=500,
             mimetype="application/json",
         )
@@ -65,7 +81,7 @@ def realtime_access(req: func.HttpRequest) -> func.HttpResponse:
         data=payload,
         method="POST",
         headers={
-            "Authorization": f"Bearer {aad_token}",
+            **auth_headers,
             "Content-Type": "application/json",
         },
     )

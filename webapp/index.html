@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Azure OpenAI Realtime Demo</title>
+  <style>
+    :root {
+      color: #17232e;
+      background: #eef3f0;
+      font-family: Georgia, "Times New Roman", serif;
+    }
+
+    body {
+      display: grid;
+      min-height: 100vh;
+      margin: 0;
+      place-items: center;
+    }
+
+    main {
+      width: min(40rem, calc(100% - 3rem));
+      padding: 3rem 0;
+    }
+
+    h1 {
+      margin: 0 0 0.75rem;
+      font-size: 2.5rem;
+      font-weight: 600;
+      line-height: 1.1;
+    }
+
+    p {
+      color: #42525e;
+      font-family: "Trebuchet MS", sans-serif;
+      line-height: 1.6;
+    }
+
+    nav {
+      display: grid;
+      gap: 0.75rem;
+      margin-top: 2rem;
+    }
+
+    a {
+      border: 1px solid #9aaca4;
+      color: #073b35;
+      font-family: "Trebuchet MS", sans-serif;
+      padding: 1rem;
+      text-decoration: none;
+    }
+
+    a:hover,
+    a:focus-visible {
+      background: #d9e8df;
+      outline: 3px solid #0d6c5f;
+      outline-offset: 2px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Azure OpenAI Realtime Demo</h1>
+    <p>Choose a demo to start a real-time WebRTC session through the deployed token service.</p>
+    <nav aria-label="Available demos">
+      <a href="gpt-realtime-livevoice-demo.html">Live voice demo</a>
+      <a href="gpt-realtime_function_call_map.html">Function call map demo</a>
+    </nav>
+  </main>
+</body>
+</html>
