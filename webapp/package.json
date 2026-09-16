@@ -1,0 +1,17 @@
+{
+  "name": "azure-realtime-demo",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node server.cjs",
+    "test": "node --test",
+    "probe": "node customer-probe.cjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@azure/identity": "^4.13.0",
+    "ws": "^8.18.3"
+  }
+}

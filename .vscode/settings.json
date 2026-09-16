@@ -5,5 +5,11 @@
     "azureFunctions.projectLanguage": "Python",
     "azureFunctions.projectRuntime": "~4",
     "debug.internalConsoleOptions": "neverOpen",
-    "azureFunctions.projectLanguageModel": 2
+    "azureFunctions.projectLanguageModel": 2,
+    "chat.tools.terminal.autoApprove": {
+        "/^uv --native-tls pip install --python 'c:\\\\work\\\\demos\\\\gptrealtimedemo\\\\\\.venv\\\\Scripts\\\\python\\.exe' pypdf$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
 }

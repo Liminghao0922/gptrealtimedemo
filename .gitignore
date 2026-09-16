@@ -3,4 +3,5 @@ api/__pycache__/
 api/.azurite/
 api/local.settings.json
 *.py[cod]
+webapp/node_modules/
 .azure/*

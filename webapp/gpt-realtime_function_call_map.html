@@ -132,21 +132,29 @@
     </div>
 
     <div class="config-panel">
+        <p>同じホストのアクセス API から接続情報を取得します。ブラウザーは client_secrets が発行する短期トークンを使用します。Entra 認証はバックエンドのみです。</p>
         <div class="config-row">
-            <label for="functionUrl">Function API URL</label>
-            <input id="functionUrl" value="http://localhost:7071/api/realtime-access" />
+            <label for="functionUrl">アクセス API URL（通常は変更不要）</label>
+            <input id="functionUrl" value="/api/realtime-access" />
         </div>
         <div class="config-row">
-            <label for="functionKey">Function Key（ローカル実行時は空欄可）</label>
-            <input id="functionKey" placeholder="Azure へデプロイ後に Function Key を入力" />
+            <label for="demoKey">Demo キー（同一オリジン専用）</label>
+            <input id="demoKey" type="password" autocomplete="off" placeholder="管理者から共有された Demo キー" />
         </div>
+        <details>
+            <summary>外部 Azure Function を使用する場合</summary>
+            <p>アクセス API URL を変更し、送信先を確認して専用 Function キーを入力してください。Demo キーは外部に送信しません。</p>
+            <label for="functionKey">外部 Function キー（指定 URL にのみ送信）</label>
+            <input id="functionKey" type="password" autocomplete="off" placeholder="外部 Function 専用キー" />
+        </details>
         <div class="config-row">
             <label for="voice">Voice</label>
             <select id="voice">
                 <option value="alloy">alloy</option>
-                <option value="verse" selected>verse</option>
+                <option value="verse">verse</option>
                 <option value="sage">sage</option>
                 <option value="ash">ash</option>
+                <option value="coral" selected>coral</option>
             </select>
         </div>
         <div class="config-row">
@@ -165,7 +173,11 @@
     <!-- Log container for API messages -->
     <div id="logContainer"></div>
 
+    <script src="realtime-experiments.js"></script>
     <script>
+        const access = RealtimeExperiments.createBrowserAccess({
+            document, pageUrl: window.location.href, fetchImpl: (url, options) => fetch(url, options)
+        });
         // OpenStreetMap (Leaflet) の初期化
         let map;
         let peerConnection = null;
@@ -173,8 +185,6 @@
         let clientMedia = null;
         let audioElement = null;
 
-        const functionUrlEl = document.getElementById('functionUrl');
-        const functionKeyEl = document.getElementById('functionKey');
         const voiceEl = document.getElementById('voice');
         const instructionsEl = document.getElementById('instructions');
         const startBtn = document.getElementById('startBtn');
@@ -202,66 +212,31 @@
         };
 
         function setStatus(message) {
-            statusEl.textContent = `状態: ${message}`;
+            statusEl.textContent = `状態: ${access.safe(message)}`;
         }
 
         async function getEphemeralSession() {
-            const baseUrl = functionUrlEl.value.trim();
-            if (!baseUrl) {
-                throw new Error('Function API URL を入力してください。');
-            }
-
-            const key = functionKeyEl.value.trim();
-            const separator = baseUrl.includes('?') ? '&' : '?';
-            const functionUrl = key
-                ? `${baseUrl}${separator}code=${encodeURIComponent(key)}`
-                : baseUrl;
-
-            const response = await fetch(functionUrl, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    voice: voiceEl.value,
-                    instructions: instructionsEl.value
-                })
+            return access.getSession({
+                transport: 'webrtc', voice: voiceEl.value, instructions: instructionsEl.value
             });
-
-            const data = await response.json();
-            if (!response.ok) {
-                throw new Error(`Function の呼び出しに失敗しました: ${JSON.stringify(data)}`);
-            }
-
-            const token = data.ephemeral_token || data?.session?.client_secret?.value;
-            if (!token || !data.webrtc_url) {
-                throw new Error(`Function の応答に必要なフィールドがありません: ${JSON.stringify(data)}`);
-            }
-
-            return {
-                token,
-                webrtcUrl: data.webrtc_url,
-                raw: data
-            };
         }
 
         async function startSession() {
+            if (peerConnection || startBtn.disabled) return;
             try {
                 startBtn.disabled = true;
                 setStatus('一時トークンを取得中...');
                 const session = await getEphemeralSession();
-                logMessage('Function から接続情報を取得しました');
-                logMessage(`Ephemeral Key Received: ***`);
+                logMessage('接続情報を取得しました: ' + JSON.stringify(session.info));
 
                 await init(session);
 
             } catch (error) {
-                console.error('Error starting session:', error);
                 logMessage('Error starting session: ' + (error?.message || String(error)));
                 setStatus('接続に失敗しました');
                 await stopSession();
             } finally {
-                startBtn.disabled = false;
+                startBtn.disabled = peerConnection !== null;
             }
         }
 
@@ -289,19 +264,11 @@
             peerConnection.addTrack(audioTrack);
 
             dataChannel = peerConnection.createDataChannel('realtime-channel');
+            let greetingSent = false;
 
             dataChannel.addEventListener('open', () => {
                 logMessage('Data channel is open');
                 updateSession(dataChannel);
-                
-                // セッション開始後、AIに最初の発話を促す
-                setTimeout(() => {
-                    const responseCreateEvent = {
-                        type: "response.create"
-                    };
-                    dataChannel.send(JSON.stringify(responseCreateEvent));
-                    logMessage("Sent initial response.create to trigger AI greeting");
-                }, 10); // セッション更新後に少し待ってから送信
             });
 
             dataChannel.addEventListener('message', (event) => {
@@ -317,8 +284,17 @@
                     if (text) logMessage("Sent client event: " + text, "user");
                 }
 
-                // フィルタ: response.audio_transcript.done のイベントだけを表示
-                if (realtimeEvent.type === "response.audio_transcript.done") {
+                if (realtimeEvent.type === "session.updated" && !greetingSent) {
+                    greetingSent = true;
+                    dataChannel.send(JSON.stringify({ type: "response.create" }));
+                }
+                if (realtimeEvent.type === "error") {
+                    logMessage("Realtime error: " + realtimeEvent.error.message);
+                    setStatus('Realtime エラー');
+                }
+
+                if (realtimeEvent.type === "response.output_audio_transcript.done" ||
+                    realtimeEvent.type === "response.audio_transcript.done") {
                     const text = (realtimeEvent.transcript || "").trim();
                     logMessage("Received server event: " + text, "assistant");
                 }
@@ -418,6 +394,8 @@
 
             const sdpResponse = await fetch(session.webrtcUrl, {
                 method: "POST",
+                redirect: "error",
+                signal: AbortSignal.timeout(20000),
                 body: offer.sdp,
                 headers: {
                     Authorization: `Bearer ${session.token}`,
@@ -426,7 +404,7 @@
             });
 
             if (!sdpResponse.ok) {
-                throw new Error(`Realtime SDP の交換に失敗しました: ${await sdpResponse.text()}`);
+                throw new Error(`Realtime SDP HTTP ${sdpResponse.status}: ${access.safe(await sdpResponse.text())}`);
             }
 
             const answer = { type: "answer", sdp: await sdpResponse.text() };
@@ -439,12 +417,21 @@
                 const event = {
                     type: "session.update",
                     session: {
+                        type: "realtime",
                         instructions: instructionsEl.value,
-                        turn_detection: {
-                            type: "server_vad",
-                            threshold: 0.5,
-                            prefix_padding_ms: 300,
-                            silence_duration_ms: 500
+                        audio: {
+                            input: {
+                                turn_detection: {
+                                    type: "server_vad",
+                                    threshold: 0.75,
+                                    prefix_padding_ms: 300,
+                                    silence_duration_ms: 500
+                                },
+                                transcription: {
+                                    model: "gpt-4o-mini-transcribe",
+                                    language: "ja"
+                                }
+                            }
                         },
                         tools: [
                             {
@@ -462,11 +449,7 @@
                                     "required": ["destination"]
                                 }
                             }
-                        ],
-                        input_audio_transcription: {
-                            model: "gpt-4o-transcribe",
-                            language: "ja"
-                        }
+                        ]
                     }
                 };
                 dataChannel.send(JSON.stringify(event));
@@ -499,6 +482,8 @@
             }
 
             stopBtn.disabled = true;
+            startBtn.disabled = false;
+            window.__funcCallBuffers = {};
             setStatus('切断しました');
             logMessage('Session closed.');
         }
@@ -506,7 +491,7 @@
         function logMessage(message) {
             const logContainer = document.getElementById("logContainer");
             const p = document.createElement("p");
-            p.textContent = message;
+            p.textContent = access.safe(message);
             logContainer.appendChild(p);
             logContainer.scrollTop = logContainer.scrollHeight;
         }

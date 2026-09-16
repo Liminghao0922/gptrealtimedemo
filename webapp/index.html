@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ja">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -61,10 +61,12 @@
 <body>
   <main>
     <h1>Azure OpenAI Realtime Demo</h1>
-    <p>Choose a demo to start a real-time WebRTC session through the deployed token service.</p>
-    <nav aria-label="Available demos">
-      <a href="gpt-realtime-livevoice-demo.html">Live voice demo</a>
-      <a href="gpt-realtime_function_call_map.html">Function call map demo</a>
+    <p>音声デモを選択し、管理者から共有された Demo キーを入力してください。同じホストの /api/realtime-access と /realtime-relay を使用します。外部 Function の利用は各ページの詳細設定から選択できます。</p>
+    <p>ブラウザーは client_secrets が発行する短期トークンを使用します。Entra 認証はバックエンドのみです。キーは URL やブラウザーのストレージに保存しません。</p>
+    <nav aria-label="利用可能なデモ">
+      <a href="gpt-realtime-livevoice-demo.html">WebRTC リアルタイム音声デモ</a>
+      <a href="gpt-realtime_function_call_map.html">関数呼び出し・音声ナビゲーションデモ</a>
+      <a href="gpt-realtime-websocket-demo.html">WebSocket 音声・文字起こし検証デモ</a>
     </nav>
   </main>
 </body>

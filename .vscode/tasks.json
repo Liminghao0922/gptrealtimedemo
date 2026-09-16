@@ -28,6 +28,23 @@
 			"options": {
 				"cwd": "${workspaceFolder}/api"
 			}
+		},
+		{
+			"label": "realtime: local experiment server",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"--prefix",
+				"webapp",
+				"start"
+			],
+			"isBackground": true,
+			"problemMatcher": [],
+			"options": {
+				"env": {
+					"PORT": "8123"
+				}
+			}
 		}
 	]
 }

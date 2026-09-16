@@ -1,0 +1,530 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Azure OpenAI リアルタイム WebSocket デモ</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; max-width: 900px; }
+    h1 { margin-bottom: 8px; }
+    .row { margin: 10px 0; }
+    label { display: block; margin-bottom: 6px; font-weight: 600; }
+    input, textarea, select, button {
+      width: 100%; box-sizing: border-box; padding: 8px; font-size: 14px;
+    }
+    textarea { min-height: 84px; resize: vertical; }
+    .btns { display: flex; gap: 10px; }
+    .btns button { width: auto; min-width: 120px; }
+    #status { padding: 10px; background: #f4f4f4; border-radius: 6px; margin: 12px 0; }
+    #events {
+      white-space: pre-wrap; background: #111; color: #d2f8d2; padding: 12px;
+      border-radius: 6px; min-height: 180px; max-height: 360px; overflow: auto;
+    }
+    fieldset { border: 1px solid #bbb; margin: 16px 0; }
+    input[type="checkbox"] { width: auto; }
+    .btns { flex-wrap: wrap; }
+    .transcripts { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .transcripts pre { background: #f4f4f4; padding: 12px; min-height: 100px; max-height: 300px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <h1>Azure OpenAI リアルタイム WebSocket デモ</h1>
+  <p>同じホストのアクセス API から一時トークンを取得し、/realtime-relay 経由で Realtime WebSocket に接続します。</p>
+  <p>ブラウザーは client_secrets が発行する短期トークンを使用します。Entra 認証はバックエンドのみです。</p>
+
+  <fieldset id="settings">
+  <legend>接続・音声設定（変更後は再接続）</legend>
+  <div class="row">
+    <label for="functionUrl">アクセス API URL（通常は変更不要）</label>
+    <input id="functionUrl" value="/api/realtime-access" />
+  </div>
+
+  <div class="row">
+    <label for="demoKey">Demo キー（同一オリジン専用）</label>
+    <input id="demoKey" type="password" autocomplete="off" placeholder="管理者から共有された Demo キー" />
+  </div>
+  <details>
+    <summary>外部 Azure Function を使用する場合</summary>
+    <p>アクセス API URL を変更し、送信先を確認して専用 Function キーを入力してください。Demo キーは外部に送信しません。保護された同一ホストのリレーでは外部発行トークンを使用できません。</p>
+    <label for="functionKey">外部 Function キー（指定 URL にのみ送信）</label>
+    <input id="functionKey" type="password" autocomplete="off" placeholder="外部 Function 専用キー" />
+  </details>
+
+  <div class="row">
+    <label for="voice">Voice</label>
+    <select id="voice">
+      <option value="alloy">alloy</option>
+      <option value="verse">verse</option>
+      <option value="sage">sage</option>
+      <option value="ash">ash</option>
+      <option value="coral" selected>coral</option>
+    </select>
+  </div>
+
+  <div class="row">
+    <label for="instructions">システム指示（任意）</label>
+    <textarea id="instructions">日本語で簡潔かつ自然に回答してください。</textarea>
+  </div>
+
+  <button id="presetBtn" type="button">日本語・半二重プリセットを適用</button>
+  <div class="row">
+    <label for="transcriptionModel">入力音声の文字起こしモデル</label>
+    <select id="transcriptionModel">
+      <option value="off">無効（音声対話のみ・比較用）</option>
+      <option value="whisper-1">whisper-1</option>
+      <option value="gpt-4o-mini-transcribe" selected>gpt-4o-mini-transcribe（既定）</option>
+      <option value="gpt-4o-transcribe">gpt-4o-transcribe</option>
+      <option value="custom">デプロイ名を指定して検証</option>
+    </select>
+  </div>
+  <div class="row">
+    <label for="transcriptionDeployment">検証する Transcribe デプロイ名（custom 選択時）</label>
+    <input id="transcriptionDeployment" placeholder="実際に作成済みのデプロイ名" />
+  </div>
+  <div class="row">
+    <label for="transcriptionLanguage">入力言語（ISO-639-1・空欄なら自動判定）</label>
+    <input id="transcriptionLanguage" value="ja" placeholder="ja" />
+  </div>
+  <div class="row">
+    <label for="transcriptionPrompt">文字起こし用ヒント（システム指示とは別）</label>
+    <input id="transcriptionPrompt" placeholder="専門用語・認識してほしい表現" />
+  </div>
+  <div class="row">
+    <label for="vadThreshold">Server VAD threshold</label>
+    <input id="vadThreshold" type="number" min="0" max="1" step="0.05" value="0.75" />
+    <label for="prefixPadding">prefix_padding_ms</label>
+    <input id="prefixPadding" type="number" min="0" step="1" value="300" />
+    <label for="silenceDuration">silence_duration_ms</label>
+    <input id="silenceDuration" type="number" min="1" step="1" value="500" />
+  </div>
+  <label><input id="createResponse" type="checkbox" checked /> VAD で自動応答する</label>
+  <label><input id="interruptResponse" type="checkbox" /> VAD で応答を割り込む</label>
+  <label><input id="greeting" type="checkbox" /> 接続時に挨拶を生成する</label>
+  <label><input id="muteDuringPlayback" type="checkbox" checked /> 半二重：発話中・再生中・残響待ち 300 ms はマイク送信停止</label>
+  </fieldset>
+  <p>入力文字起こしは音声対話と並行する別処理です。AI の発話字幕とは異なり、AI の応答後に到着することもあります。
+    同じ発話で「無効 / Whisper / GPT / デプロイ名」を比較し、失敗イベントも確認してください。自動フォールバックは行いません。</p>
+
+  <div class="btns">
+    <button id="startBtn">WebSocket 会話を開始</button>
+    <button id="stopBtn" disabled>停止</button>
+    <button id="responseBtn" disabled>手動 response.create</button>
+    <button id="exportBtn" disabled>検証結果 JSON を保存</button>
+  </div>
+  <label><input id="pauseMicrophone" type="checkbox" /> マイク送信を手動で一時停止</label>
+
+  <div id="status">状態：未接続</div>
+  <div class="transcripts" aria-live="polite">
+    <section><h2>ユーザーの入力文字起こし</h2><pre id="inputTranscript">未実行</pre></section>
+    <section><h2>AI の発話字幕</h2><pre id="outputTranscript">未実行</pre></section>
+  </div>
+  <pre id="metrics"></pre>
+  <details><summary>送信設定 / session.updated の実測値</summary><pre id="sessionConfig"></pre></details>
+  <p>保存結果には発話テキスト・ホスト名が含まれます。共有前に内容をご確認ください。キー・トークン・音声データは保存しません。</p>
+  <div id="events"></div>
+
+  <script src="realtime-experiments.js"></script>
+  <script>
+    const { DEFAULT_PRESET, buildSessionUpdate, createBrowserAccess, ExperimentRecorder } = RealtimeExperiments;
+    const access = createBrowserAccess({
+      document, pageUrl: window.location.href, fetchImpl: (url, options) => fetch(url, options)
+    });
+    const SAMPLE_RATE = 24000;
+    const statusEl = document.getElementById("status");
+    const eventsEl = document.getElementById("events");
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const voiceEl = document.getElementById("voice");
+    const instructionsEl = document.getElementById("instructions");
+    const settingsEl = document.getElementById("settings");
+    const responseBtn = document.getElementById("responseBtn");
+    const exportBtn = document.getElementById("exportBtn");
+    const inputTranscriptEl = document.getElementById("inputTranscript");
+    const outputTranscriptEl = document.getElementById("outputTranscript");
+    const metricsEl = document.getElementById("metrics");
+    const sessionConfigEl = document.getElementById("sessionConfig");
+
+    let socket = null;
+    let audioContext = null;
+    let mediaStream = null;
+    let mediaSource = null;
+    let audioProcessor = null;
+    let nextPlaybackTime = 0;
+    let greetingSent = false;
+    let recorder = null;
+    let requestedUpdate = null;
+    let connectionInfo = null;
+    let responseActive = false;
+    let mutedUntil = 0;
+    const playbackSources = new Set();
+
+    function experimentOptions() {
+      const selectedModel = document.getElementById("transcriptionModel").value;
+      return {
+        voice: voiceEl.value, instructions: instructionsEl.value,
+        transcriptionModel: selectedModel === "custom"
+          ? document.getElementById("transcriptionDeployment").value : selectedModel,
+        language: document.getElementById("transcriptionLanguage").value,
+        prompt: document.getElementById("transcriptionPrompt").value,
+        threshold: Number(document.getElementById("vadThreshold").value),
+        prefixPaddingMs: Number(document.getElementById("prefixPadding").value),
+        silenceDurationMs: Number(document.getElementById("silenceDuration").value),
+        createResponse: document.getElementById("createResponse").checked,
+        interruptResponse: document.getElementById("interruptResponse").checked
+      };
+    }
+
+    function renderExperiment() {
+      if (!recorder) return;
+      const report = access.safe(recorder.snapshot());
+      const enabled = requestedUpdate.session.audio.input.transcription !== null;
+      inputTranscriptEl.textContent = report.inputTranscripts.map(row =>
+        `${row.itemId}:${row.contentIndex} [${!enabled && row.status === "pending" ? "disabled" : row.status}]\n${row.text || (row.status === "failed"
+          ? "文字起こし失敗" : enabled ? "結果待ち" : "文字起こし無効")}` +
+        (row.finalAfterCommitMs === null ? "" : `\n確定まで ${row.finalAfterCommitMs} ms（発話終了/commit 受信から）`) +
+        (row.error ? `\n${JSON.stringify(row.error)}` : "")
+      ).join("\n\n") || (enabled ? "入力待ち" : "文字起こし無効：AI の音声応答とは独立して比較できます");
+      outputTranscriptEl.textContent = report.assistantTranscripts.map(row =>
+        `${row.responseId} / ${row.itemId} [${row.status}]\n${row.text}`
+      ).join("\n\n") || "応答待ち";
+      metricsEl.textContent = JSON.stringify({
+        inputCompleted: report.inputTranscripts.filter(row => row.status === "completed").length,
+        inputFailed: report.inputTranscripts.filter(row => row.status === "failed").length,
+        errors: report.errors.length, outputAudioBytes: report.outputAudioBytes,
+        eventCounts: report.eventCounts
+      }, null, 2);
+      sessionConfigEl.textContent = JSON.stringify(access.safe({
+        connection: connectionInfo, requested: requestedUpdate, observed: report.observedSession
+      }), null, 2);
+    }
+
+    function setStatus(message) {
+      statusEl.textContent = `状態：${access.safe(message)}`;
+    }
+
+    function log(message, value) {
+      let line = `[${new Date().toLocaleTimeString()}] ${access.safe(message)}`;
+      if (value !== undefined) {
+        try {
+          const safe = access.safe(value);
+          line += `\n${typeof safe === "string" ? safe : JSON.stringify(safe, null, 2)}`;
+        } catch {
+          line += "\n[表示できないイベント]";
+        }
+      }
+      eventsEl.textContent += `${line}\n\n`;
+      if (eventsEl.textContent.length > 60000) eventsEl.textContent = eventsEl.textContent.slice(-60000);
+      eventsEl.scrollTop = eventsEl.scrollHeight;
+    }
+
+    async function getEphemeralSession() {
+      const session = await access.getSession({
+        transport: "websocket", voice: voiceEl.value, instructions: instructionsEl.value
+      });
+      connectionInfo = session.info;
+      return session;
+    }
+
+    function encodePcm16(float32Data) {
+      const pcm16 = new Int16Array(float32Data.length);
+      for (let index = 0; index < float32Data.length; index += 1) {
+        const sample = Math.max(-1, Math.min(1, float32Data[index]));
+        pcm16[index] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+      }
+      const bytes = new Uint8Array(pcm16.buffer);
+      let binary = "";
+      for (const byte of bytes) {
+        binary += String.fromCharCode(byte);
+      }
+      return btoa(binary);
+    }
+
+    function decodePcm16(base64Data) {
+      const binary = atob(base64Data);
+      const pcm16 = new Int16Array(binary.length / 2);
+      for (let index = 0; index < pcm16.length; index += 1) {
+        pcm16[index] = binary.charCodeAt(index * 2) | (binary.charCodeAt(index * 2 + 1) << 8);
+      }
+
+      const audioBuffer = audioContext.createBuffer(1, pcm16.length, SAMPLE_RATE);
+      const channel = audioBuffer.getChannelData(0);
+      for (let index = 0; index < pcm16.length; index += 1) {
+        channel[index] = pcm16[index] / 0x8000;
+      }
+      return audioBuffer;
+    }
+
+    function playAudioChunk(base64Data) {
+      const audioBuffer = decodePcm16(base64Data);
+      const source = audioContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioContext.destination);
+      playbackSources.add(source);
+      source.onended = () => {
+        playbackSources.delete(source);
+        if (audioContext) mutedUntil = Math.max(mutedUntil, audioContext.currentTime + 0.3);
+      };
+      nextPlaybackTime = Math.max(nextPlaybackTime, audioContext.currentTime);
+      source.start(nextPlaybackTime);
+      nextPlaybackTime += audioBuffer.duration;
+    }
+
+    function sendEvent(event) {
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        throw new Error("WebSocket が接続されていません。");
+      }
+      socket.send(JSON.stringify(event));
+    }
+
+    function configureSession() {
+      log("session.update を送信", requestedUpdate);
+      sendEvent(requestedUpdate);
+    }
+
+    function handleEvent(event) {
+      const isAudio = event.type === "response.output_audio.delta" || event.type === "response.audio.delta";
+      recorder.record(isAudio ? event : access.safe(event));
+      if (event.type === "session.created") configureSession();
+      if (event.type === "response.created") responseActive = true;
+      if (event.type === "response.done") responseActive = false;
+      if (event.type === "response.output_audio.delta" || event.type === "response.audio.delta") {
+        playAudioChunk(event.delta);
+        return;
+      }
+      renderExperiment();
+      if (event.type === "response.output_audio_transcript.delta" ||
+          event.type === "response.audio_transcript.delta") {
+        log("AI", event.delta);
+        return;
+      }
+      if (event.type === "conversation.item.input_audio_transcription.completed") {
+        log("ユーザー", event.transcript);
+        return;
+      }
+      if (event.type === "conversation.item.input_audio_transcription.failed") {
+        log("入力文字起こしが失敗しました（音声応答とは別）", event);
+        setStatus("入力文字起こしエラー。モデル名・デプロイ・権限を確認してください");
+        return;
+      }
+      if (event.type === "session.updated" && !greetingSent) {
+        greetingSent = true;
+        startAudioCapture();
+        stopBtn.disabled = false;
+        responseBtn.disabled = false;
+        setStatus("接続しました。会話を開始できます");
+        if (document.getElementById("greeting").checked) sendEvent({
+          type: "response.create",
+          response: { instructions: "日本語で簡単に自己紹介してください。" }
+        });
+        return;
+      }
+      if (event.type === "error") {
+        log("Realtime エラー", event);
+        setStatus("Realtime エラー");
+        return;
+      }
+      if (event.type !== "response.output_audio.done" &&
+          event.type !== "response.audio.done" &&
+          event.type !== "rate_limits.updated") {
+        log("Realtime イベント", event);
+      }
+    }
+
+    function startAudioCapture() {
+      mediaSource = audioContext.createMediaStreamSource(mediaStream);
+      audioProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+      audioProcessor.onaudioprocess = (event) => {
+        const playbackMuted = document.getElementById("muteDuringPlayback").checked &&
+          (responseActive || playbackSources.size > 0 || audioContext.currentTime < mutedUntil);
+        if (socket && socket.readyState === WebSocket.OPEN &&
+            !document.getElementById("pauseMicrophone").checked && !playbackMuted) {
+          sendEvent({
+            type: "input_audio_buffer.append",
+            audio: encodePcm16(event.inputBuffer.getChannelData(0))
+          });
+        }
+      };
+      const mutedOutput = audioContext.createGain();
+      mutedOutput.gain.value = 0;
+      mediaSource.connect(audioProcessor);
+      audioProcessor.connect(mutedOutput);
+      mutedOutput.connect(audioContext.destination);
+    }
+
+    async function start() {
+      if (socket || startBtn.disabled) {
+        log("接続は既に開始されています。");
+        return;
+      }
+      startBtn.disabled = true;
+      try {
+        requestedUpdate = buildSessionUpdate(experimentOptions());
+        settingsEl.disabled = true;
+        recorder = new ExperimentRecorder();
+        connectionInfo = null;
+        exportBtn.disabled = false;
+        eventsEl.textContent = "";
+        renderExperiment();
+        setStatus("一時トークンを取得中...");
+        const session = await getEphemeralSession();
+        log("セッションを取得しました", session.info);
+
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        audioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
+        await audioContext.resume();
+        if (audioContext.sampleRate !== SAMPLE_RATE) {
+          throw new Error(`24 kHz の AudioContext が必要です。実際: ${audioContext.sampleRate} Hz`);
+        }
+        nextPlaybackTime = audioContext.currentTime;
+
+        setStatus("WebSocket 接続を確立中...");
+        await new Promise((resolve, reject) => {
+          let ready = false;
+          const relayUrl = new URL("/realtime-relay", window.location.href);
+          relayUrl.protocol = relayUrl.protocol === "https:" ? "wss:" : "ws:";
+          const connection = new WebSocket(relayUrl);
+          socket = connection;
+          const timeout = setTimeout(() => reject(new Error("WebSocket の接続がタイムアウトしました。")), 25000);
+          connection.onopen = () => {
+            connection.send(JSON.stringify(session.connectFrame));
+          };
+          connection.onmessage = (event) => {
+            if (socket !== connection) return;
+            try {
+              const message = JSON.parse(event.data);
+              if (message.type === "relay.ready") {
+                log("Azure WebSocket が開きました");
+                setStatus("session.created を待機中...");
+              } else if (message.type === "relay.error") {
+                throw new Error(message.error.message);
+              } else {
+                handleEvent(message);
+                if (message.type === "error" && !ready) {
+                  throw new Error(message.error.message);
+                }
+                if (message.type === "session.updated") {
+                  clearTimeout(timeout);
+                  ready = true;
+                  resolve();
+                }
+              }
+            } catch (error) {
+              clearTimeout(timeout);
+              log("Realtime エラー", error.message);
+              if (!ready) reject(error);
+              else void stop("Realtime エラーで切断しました");
+            }
+          };
+          connection.onerror = () => {
+            clearTimeout(timeout);
+            log("WebSocket エラーが発生しました");
+            if (!ready) {
+              reject(new Error("同一ホストの /realtime-relay に接続できません。サーバーの稼働状態を確認してください。"));
+            }
+          };
+          connection.onclose = (event) => {
+            clearTimeout(timeout);
+            if (socket !== connection) return;
+            log("WebSocket が閉じられました", {
+              code: event.code,
+              reason: event.reason
+            });
+            if (!ready) {
+              reject(new Error(`WebSocket 接続が閉じられました (${event.code})`));
+            } else {
+              void stop(`WebSocket が閉じられました (${event.code})`);
+            }
+          };
+        });
+      } catch (error) {
+        log("開始に失敗しました", error?.message || String(error));
+        await stop("開始に失敗しました");
+      }
+    }
+
+    async function stop(message = "切断しました") {
+      stopBtn.disabled = true;
+      responseBtn.disabled = true;
+      if (audioProcessor) {
+        audioProcessor.disconnect();
+        audioProcessor.onaudioprocess = null;
+        audioProcessor = null;
+      }
+      if (mediaSource) {
+        mediaSource.disconnect();
+        mediaSource = null;
+      }
+      if (mediaStream) {
+        for (const track of mediaStream.getTracks()) {
+          track.stop();
+        }
+        mediaStream = null;
+      }
+      if (socket) {
+        const connection = socket;
+        socket = null;
+        if (connection.readyState === WebSocket.OPEN || connection.readyState === WebSocket.CONNECTING) {
+          connection.close();
+        }
+      }
+      if (audioContext) {
+        for (const source of playbackSources) {
+          source.onended = null;
+          source.stop();
+        }
+        playbackSources.clear();
+        const context = audioContext;
+        audioContext = null;
+        await context.close();
+      }
+      greetingSent = false;
+      responseActive = false;
+      mutedUntil = 0;
+      recorder?.finish();
+      startBtn.disabled = false;
+      settingsEl.disabled = false;
+      renderExperiment();
+      setStatus(message);
+    }
+
+    startBtn.addEventListener("click", () => { void start(); });
+    stopBtn.addEventListener("click", () => { void stop(); });
+    responseBtn.addEventListener("click", () => {
+      try {
+        sendEvent({ type: "response.create" });
+      } catch (error) {
+        log("応答作成に失敗しました", error.message);
+      }
+    });
+    document.getElementById("presetBtn").addEventListener("click", () => {
+      voiceEl.value = DEFAULT_PRESET.voice;
+      document.getElementById("transcriptionModel").value = DEFAULT_PRESET.transcriptionModel;
+      document.getElementById("transcriptionLanguage").value = DEFAULT_PRESET.language;
+      document.getElementById("transcriptionPrompt").value = DEFAULT_PRESET.prompt;
+      document.getElementById("vadThreshold").value = DEFAULT_PRESET.threshold;
+      document.getElementById("prefixPadding").value = DEFAULT_PRESET.prefixPaddingMs;
+      document.getElementById("silenceDuration").value = DEFAULT_PRESET.silenceDurationMs;
+      document.getElementById("createResponse").checked = DEFAULT_PRESET.createResponse;
+      document.getElementById("interruptResponse").checked = DEFAULT_PRESET.interruptResponse;
+      document.getElementById("greeting").checked = false;
+      document.getElementById("muteDuringPlayback").checked = true;
+      setStatus("日本語・半二重設定を適用しました。次の接続に使用します");
+    });
+    exportBtn.addEventListener("click", () => {
+      const report = access.safe({
+        schemaVersion: 1, transport: "websocket-same-origin-relay",
+        connection: connectionInfo, requested: requestedUpdate, ...recorder.snapshot()
+      });
+      const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: "application/json" }));
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `realtime-experiment-${Date.now()}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
+  </script>
+</body>
+</html>
