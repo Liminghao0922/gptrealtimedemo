@@ -1,7 +1,7 @@
 #requires -Version 7.4
 <#
 .SYNOPSIS
-Validates, or explicitly deploys, the approved Japan East F1 unified App Service.
+Validates, or explicitly deploys, the approved Japan East F1 page and relay host.
 .DESCRIPTION
 The default action (also -ValidateOnly) is ARM validation, NOT deployment. -Deploy
 is required for any cloud writes. Sign in separately with Azure CLI; this script
@@ -28,19 +28,26 @@ If Node 24 remote build/F1 fails, stop and investigate; never upgrade the SKU.
 Health checks are external and unauthenticated; no access key is sent to /health.
 /health establishes process liveness only, not AOAI authorization or relay readiness.
 RuntimeDirectory and WebRoot default to the current unified runtime in webapp.
+FunctionAccessUrl is public configuration for the separate existing Function.
+It must not contain a key. Configure that Function's CORS allowlist separately;
+this script does not publish the Function or change its settings.
 Returns only nonsecret resourceId/defaultHostName and status/URL fields. Validation
 returns a target resourceId and null defaultHostName: it does not create/query a site.
 .EXAMPLE
-./scripts/deploy-appservice.ps1 -AoaiRealtimeDeployment '<existing-deployment>' -ValidateOnly
+./scripts/deploy-appservice.ps1 -AoaiRealtimeDeployment '<existing-deployment>' -FunctionAccessUrl 'https://<function-host>/api/realtime-access' -ValidateOnly
 .EXAMPLE
 $key = Read-Host 'Demo access key' -AsSecureString
-./scripts/deploy-appservice.ps1 -AoaiRealtimeDeployment '<existing-deployment>' -DemoAccessKey $key -Deploy
+./scripts/deploy-appservice.ps1 -AoaiRealtimeDeployment '<existing-deployment>' -FunctionAccessUrl 'https://<function-host>/api/realtime-access' -DemoAccessKey $key -Deploy
 #>
 [CmdletBinding(DefaultParameterSetName = 'Validate')]
 param(
     [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
     [string] $AoaiRealtimeDeployment,
+
+    [Parameter(Mandatory)]
+    [ValidateNotNullOrEmpty()]
+    [string] $FunctionAccessUrl,
 
     [Parameter(ParameterSetName = 'Validate')]
     [switch] $ValidateOnly,
@@ -76,6 +83,13 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
+$functionUri = $null
+if (-not [System.Uri]::TryCreate($FunctionAccessUrl, [System.UriKind]::Absolute, [ref]$functionUri) -or
+    $functionUri.Scheme -cne 'https' -or $functionUri.UserInfo -or $functionUri.Query -or
+    $functionUri.Fragment -or $functionUri.AbsolutePath -eq '/' -or
+    $functionUri.Host -ieq "$AppName.azurewebsites.net") {
+    throw 'FunctionAccessUrl must be a separate HTTPS Function endpoint without credentials, query parameters or fragment.'
+}
 $null = Get-Command az -ErrorAction Stop
 $templatePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'infra/appservice.bicep'
 if (-not (Test-Path -LiteralPath $templatePath -PathType Leaf)) {
@@ -178,6 +192,7 @@ try {
                 location = @{ value = $Location }
                 aoaiAccountName = @{ value = $AoaiAccountName }
                 aoaiRealtimeDeployment = @{ value = $AoaiRealtimeDeployment }
+                functionAccessUrl = @{ value = $FunctionAccessUrl }
                 demoAccessKey = @{ value = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($buffer) }
             }
         }

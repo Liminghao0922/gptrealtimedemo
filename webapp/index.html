@@ -61,7 +61,9 @@
 <body>
   <main>
     <h1>Azure OpenAI Realtime Demo</h1>
-    <p>音声デモを選択し、管理者から共有された Demo キーを入力してください。同じホストの /api/realtime-access と /realtime-relay を使用します。外部 Function の利用は各ページの詳細設定から選択できます。</p>
+    <p>音声デモを選択し、Function URL を確認して管理者から共有された Function キーを入力してください。一時トークンはブラウザーから Azure Function に直接 POST して取得します。</p>
+    <p>既定の Function URL は各ページで /api/demo-config から取得します。設定がない場合や静的ホストでは手動入力してください。別の Function URL にも変更できます。</p>
+    <p>WebRTC は Function キーのみを使用します。WebSocket は同じホストの /realtime-relay 認証専用に、別の Demo キーも使用します。Demo キーは Function に送信しません。</p>
     <p>ブラウザーは client_secrets が発行する短期トークンを使用します。Entra 認証はバックエンドのみです。キーは URL やブラウザーのストレージに保存しません。</p>
     <nav aria-label="利用可能なデモ">
       <a href="gpt-realtime-livevoice-demo.html">WebRTC リアルタイム音声デモ</a>

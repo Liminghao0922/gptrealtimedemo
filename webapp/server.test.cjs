@@ -68,65 +68,49 @@ function httpPost(url, headers, body) {
   });
 }
 
-test("protects cloud token issuance by key, exact origin and host, not query strings", async t => {
-  const publicOrigin = "https://demo.azurewebsites.net";
-  let calls = 0;
-  const { httpUrl } = await start(t, undefined, {
-    config: { publicOrigin, accessKey: demoKey, production: true },
-    issueToken: async (body, transport) => {
-      calls++;
-      assert.equal(body.transport, "websocket");
-      assert.equal(transport, null);
-      return { ephemeral_token: "ephemeral-test-token" };
-    }
+test("retired token endpoint returns 410 for every credential and never redirects or echoes secrets", async t => {
+  const { httpUrl } = await start(t, () => assert.fail("Must not contact Azure"), {
+    config: { accessKey: demoKey, functionUrl: "https://function.azurewebsites.net/api/realtime-access" }
   });
-  const headers = { "content-type": "application/json", host: "demo.azurewebsites.net", origin: publicOrigin };
-  const post = (extra = {}, query = "") => httpPost(`${httpUrl}/api/realtime-access${query}`,
-    { ...headers, ...extra }, '{"transport":"websocket"}');
-  assert.equal((await post()).status, 401);
-  assert.equal((await post({}, `?code=${demoKey}`)).status, 401);
-  assert.equal((await post({ "x-demo-key": "bad" })).status, 401);
-  assert.equal((await post({ "x-demo-key": demoKey, origin: "https://evil.example" })).status, 403);
-  assert.equal((await post({ "x-demo-key": demoKey, host: "evil.example" })).status, 403);
-  assert.equal(calls, 0);
-  const result = await post({ "x-demo-key": demoKey });
+  for (const headers of [{}, { "x-demo-key": demoKey }, { "x-functions-key": "function-secret" }]) {
+    const result = await httpPost(`${httpUrl}/api/realtime-access?code=secret-query`, headers, "{}");
+    assert.equal(result.status, 410);
+    assert.equal(result.headers.get("location"), null);
+    assert.equal(result.headers.get("cache-control"), "no-store");
+    const body = await result.json();
+    assert.equal(body.code, "function_issuer_required");
+    assert.equal(body.ephemeral_token, undefined);
+    assert.equal(/secret-query|function-secret|test-demo-key/.test(JSON.stringify(body)), false);
+  }
+  for (const method of ["GET", "HEAD", "OPTIONS"]) {
+    assert.equal((await fetch(`${httpUrl}/api/realtime-access`, { method })).status, 410);
+  }
+});
+
+test("public runtime configuration exposes only the Function URL and requires no key", async t => {
+  const functionUrl = "https://function.azurewebsites.net/api/realtime-access";
+  const { httpUrl } = await start(t, undefined, {
+    config: { functionUrl, accessKey: demoKey, endpoint: "https://example.openai.azure.com", deployment: "test" }
+  });
+  const result = await fetch(`${httpUrl}/api/demo-config`);
   assert.equal(result.status, 200);
   assert.equal(result.headers.get("cache-control"), "no-store");
   assert.equal(result.headers.get("access-control-allow-origin"), null);
-  assert.deepEqual(await result.json(), { ephemeral_token: "ephemeral-test-token" });
-  assert.equal((await post({ "x-functions-key": demoKey })).status, 200);
-  assert.equal((await fetch(`${httpUrl}/api/realtime-access`)).status, 405);
-  assert.equal(calls, 2);
+  assert.deepEqual(await result.json(), { function_url: functionUrl });
+  const head = await fetch(`${httpUrl}/api/demo-config`, { method: "HEAD" });
+  assert.equal(head.status, 200);
+  assert.equal(await head.text(), "");
+  const post = await httpPost(`${httpUrl}/api/demo-config`, {}, "{}");
+  assert.equal(post.status, 405);
+  assert.equal(post.headers.get("allow"), "GET, HEAD");
 });
 
-test("token request errors and rate limits are explicit without leaking secrets", async t => {
-  const logs = [];
-  let clock = 60000;
-  let calls = 0;
-  const { httpUrl, origin } = await start(t, undefined, {
-    now: () => clock,
-    limits: { tokenRequests: 3 },
-    logger: { error: (...args) => logs.push(args) },
-    issueToken: async () => {
-      calls++;
-      throw new Error(`private detail ${demoKey}`);
-    }
-  });
-  const headers = { "content-type": "application/json", host: new URL(origin).host };
-  const post = body => httpPost(`${httpUrl}/api/realtime-access`, headers, body);
-  assert.equal((await post("invalid JSON")).status, 400);
-  assert.equal((await post(JSON.stringify({ text: "x".repeat(17000) }))).status, 413);
-  const error = await post("{}");
-  assert.equal(error.status, 500);
-  assert.equal((await error.text()).includes(demoKey), false);
-  const limited = await post("{}");
-  assert.equal(limited.status, 429);
-  assert.equal(limited.headers.get("retry-after"), "60");
-  assert.equal(calls, 1);
-  clock += 60000;
-  assert.equal((await post("{}")).status, 500);
-  assert.equal(calls, 2);
-  assert.equal(JSON.stringify(logs).includes(demoKey), false);
+test("unconfigured local host explicitly asks for a Function URL, without breaking static pages", async t => {
+  const { httpUrl } = await start(t);
+  const result = await fetch(`${httpUrl}/api/demo-config`);
+  assert.equal(result.status, 503);
+  assert.match((await result.json()).error, /FUNCTION_ACCESS_URL/);
+  assert.equal((await fetch(httpUrl)).status, 200);
 });
 
 test("cloud relay authenticates the first frame and pins the resource and deployment", async t => {
@@ -183,42 +167,8 @@ test("relay enforces active session limit and releases slots on disconnect", asy
   await nextClosed;
 });
 
-test("default issuance limit is exactly twelve requests per minute", async t => {
-  assert.deepEqual(DEMO_LIMITS, { relays: 2, pending: 4, tokenRequests: 12, sessionMs: 900000 });
-  let count = 0;
-  const { httpUrl, origin } = await start(t, undefined, {
-    issueToken: async () => ({ sequence: ++count })
-  });
-  const post = () => httpPost(`${httpUrl}/api/realtime-access`,
-    { "content-type": "application/json", host: new URL(origin).host }, "{}");
-  for (let n = 0; n < 12; n++) assert.equal((await post()).status, 200);
-  assert.equal((await post()).status, 429);
-  assert.equal(count, 12);
-});
-
-test("token issuer admits two simultaneous requests and refuses the third", async t => {
-  const releases = [];
-  let bothStarted;
-  const started = new Promise(resolve => { bothStarted = resolve; });
-  const { httpUrl, origin } = await start(t, undefined, {
-    issueToken: () => new Promise(resolve => {
-      releases.push(resolve);
-      if (releases.length === 2) bothStarted();
-    })
-  });
-  const post = () => httpPost(`${httpUrl}/api/realtime-access`,
-    { "content-type": "application/json", host: new URL(origin).host }, "{}");
-  const first = post();
-  const second = post();
-  await started;
-  try {
-    assert.equal((await post()).status, 429);
-    assert.equal(releases.length, 2);
-  } finally {
-    for (const release of releases) release({ ephemeral_token: "test-token" });
-    assert.equal((await first).status, 200);
-    assert.equal((await second).status, 200);
-  }
+test("relay limits remain two active, four pending and fifteen minutes", () => {
+  assert.deepEqual(DEMO_LIMITS, { relays: 2, pending: 4, sessionMs: 900000 });
 });
 
 test("default relay allows exactly two active connections", async t => {
@@ -258,7 +208,7 @@ test("serves demo HTML but not settings, node_modules, or source", async t => {
   assert.equal(script.status, 200);
   assert.match(script.headers.get("content-type"), /text\/javascript/);
   assert.match(await script.text(), /ExperimentRecorder/);
-  for (const name of ["server.cjs", "customer-probe.cjs", "realtime-experiments.test.cjs", "package.json", "../api/local.settings.json", "node_modules/ws/index.js"]) {
+  for (const name of ["server.cjs", "demo-config.cjs", "realtime-access.cjs", "customer-probe.cjs", "realtime-experiments.test.cjs", "package.json", "../api/local.settings.json", "node_modules/ws/index.js"]) {
     assert.equal((await fetch(`${httpUrl}/${name}`)).status, 404);
   }
 });

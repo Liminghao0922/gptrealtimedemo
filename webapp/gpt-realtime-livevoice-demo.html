@@ -24,24 +24,19 @@
 </head>
 <body>
   <h1>Azure OpenAI リアルタイム WebRTC デモ</h1>
-  <p>「リアルタイム会話を開始」を選択すると、同じホストのアクセス API から一時トークンを取得し、Realtime WebRTC エンドポイントに接続します。</p>
+  <p>「リアルタイム会話を開始」を選択すると、指定した Azure Function から直接一時トークンを取得し、Realtime WebRTC エンドポイントに接続します。</p>
   <p>ブラウザーは client_secrets が発行する短期トークンを使用します。Entra 認証はバックエンドのみです。</p>
 
   <div class="row">
-    <label for="functionUrl">アクセス API URL（通常は変更不要）</label>
-    <input id="functionUrl" value="/api/realtime-access" />
+    <label for="functionUrl">Function URL（送信先を確認・手動変更可能）</label>
+    <input id="functionUrl" type="url" autocomplete="off" placeholder="Azure Function の絶対 URL" aria-describedby="configStatus" />
   </div>
-
+  <p id="configStatus" role="status" aria-live="polite">既定の Function URL を読み込み中です。取得できない場合は手動入力してください。</p>
   <div class="row">
-    <label for="demoKey">Demo キー（同一オリジン専用）</label>
-    <input id="demoKey" type="password" autocomplete="off" placeholder="管理者から共有された Demo キー" />
+    <label for="functionKey">Function キー（指定 Function にのみ送信）</label>
+    <input id="functionKey" type="password" autocomplete="off" placeholder="管理者から共有された Function キー" />
   </div>
-  <details>
-    <summary>外部 Azure Function を使用する場合</summary>
-    <p>アクセス API URL を変更し、送信先を確認して専用 Function キーを入力してください。Demo キーは外部に送信しません。</p>
-    <label for="functionKey">外部 Function キー（指定 URL にのみ送信）</label>
-    <input id="functionKey" type="password" autocomplete="off" placeholder="外部 Function 専用キー" />
-  </details>
+  <p>既定の URL は /api/demo-config から取得します。URL を変更すると入力済みの Function キーは消去されます。</p>
 
   <div class="row">
     <label for="voice">Voice</label>

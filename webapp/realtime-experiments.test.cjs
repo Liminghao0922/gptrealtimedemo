@@ -54,6 +54,11 @@ test("legacy Function code is moved to header and conflicting credentials reject
   assert.throws(() => functionRequest("https://example.test?code=a", "b", {}));
   assert.throws(() => functionRequest("https://example.test?code=a&code=b", "", {}));
   assert.equal(functionRequest("http://localhost:7071/api/realtime-access", "", {}).options.headers["x-functions-key"], undefined);
+  assert.equal(functionRequest("http://127.0.0.1:7071/api/realtime-access", "local-secret", {}).options.headers["x-functions-key"], "local-secret");
+  for (const url of ["http://localhost.example/api", "https://user:secret@example.test/api",
+    "https://example.test/api?token=secret", "https://example.test/api?x-functions-key=secret"]) {
+    assert.throws(() => functionRequest(url, "", {}));
+  }
 });
 
 test("input and assistant transcripts remain separate across interleaved and late events", () => {
@@ -117,21 +122,13 @@ test("stopped experiment duration remains stable when exporting later", () => {
   assert.equal(recorder.snapshot().stopped, true);
 });
 
-test("same-origin browser requests use only the Demo header and cannot redirect credentials", () => {
+test("retired same-origin token routes reject credentials instead of treating them as Demo issuer keys", () => {
   const page = "https://demo.azurewebsites.net/gpt-realtime-livevoice-demo.html";
-  for (const url of ["/api/realtime-access", "https://demo.azurewebsites.net/api/realtime-access"]) {
-    const request = browserAccessRequest(url, {
+  for (const url of ["/api/realtime-access", "https://demo.azurewebsites.net/api/realtime-access",
+    "https://demo.azurewebsites.net/api/realtime-access/", "/api/realtime-access?code=secret"]) {
+    assert.throws(() => browserAccessRequest(url, {
       demoKey: "demo-secret", functionKey: "external-secret"
-    }, { transport: "webrtc" }, page);
-    assert.equal(request.sameOrigin, true);
-    assert.equal(request.options.headers["x-demo-key"], "demo-secret");
-    assert.equal(request.options.headers["x-functions-key"], undefined);
-    assert.equal(request.options.redirect, "error");
-    assert.equal(request.options.cache, "no-store");
-    assert.doesNotMatch(request.url + request.options.body, /secret/);
-  }
-  for (const url of ["/other", "/api/realtime-access?code=secret", "/api/realtime-access#fragment"]) {
-    assert.throws(() => browserAccessRequest(url, { demoKey: "secret" }, {}, page));
+    }, { transport: "webrtc" }, page));
   }
 });
 
@@ -146,6 +143,8 @@ test("external browser requests require an explicit Function key, never the Demo
     assert.equal(request.url, url);
     assert.equal(request.options.headers["x-functions-key"], "function-secret");
     assert.equal(request.options.headers["x-demo-key"], undefined);
+    assert.equal(request.options.redirect, "error");
+    assert.equal(request.options.cache, "no-store");
   }
   for (const suffix of ["?token=secret", "?x-demo-key=secret", "?access_key=secret", "?key=secret"]) {
     assert.throws(() => browserAccessRequest(url + suffix, {}, {}, page));
@@ -191,12 +190,14 @@ test("browser access sanitizes token/error responses, legacy URLs and network er
     functionUrl: { value: "https://external.azurewebsites.net/api/realtime-access?code=function-secret" },
     functionKey: { value: "" }, demoKey: { value: "demo-secret" }
   };
+  for (const field of Object.values(fields)) field.addEventListener = () => {};
   let request;
   let fail = false;
   const access = createBrowserAccess({
     document: { getElementById: id => fields[id] },
     pageUrl: "https://demo.azurewebsites.net/index.html",
     fetchImpl: async (url, options) => {
+      if (options.method === "GET") return { ok: false, status: 503 };
       request = { url, options };
       if (fail) throw new Error("Fetch failed with function-secret and demo-secret");
       return { ok: false, status: 403, json: async () => ({
@@ -219,4 +220,168 @@ test("browser access sanitizes token/error responses, legacy URLs and network er
     assert.doesNotMatch(error.message, /function-secret|demo-secret/);
     return true;
   });
+});
+
+function accessHarness({
+  url = "", functionKey = "", config, deferConfig = false, response,
+  pageUrl = "https://demo.example/index.html"
+} = {}) {
+  const fields = Object.fromEntries(Object.entries({
+    functionUrl: url, functionKey, demoKey: "relay-secret", configStatus: ""
+  }).map(([name, value]) => [name, {
+    value, textContent: "", listeners: {},
+    addEventListener(event, listener) { this.listeners[event] = listener; }
+  }]));
+  const requests = [];
+  let resolveConfig;
+  const configResponse = new Promise(resolve => { resolveConfig = resolve; });
+  const validResponse = {
+    transport: "websocket", ephemeral_token: "ephemeral-secret", expires_at: Date.now() / 1000 + 60,
+    realtime_url: "wss://example.openai.azure.com/openai/v1/realtime?model=test"
+  };
+  const access = createBrowserAccess({
+    document: { getElementById: id => fields[id] },
+    pageUrl,
+    fetchImpl: async (url, options) => {
+      requests.push({ url, options });
+      if (options.method === "GET") {
+        if (deferConfig) return configResponse;
+        return config || { ok: true, json: async () => ({ function_url: "https://function.example/api/realtime-access" }) };
+      }
+      return { ok: true, status: 200, json: async () => response ?? validResponse };
+    }
+  });
+  return {
+    access, fields, requests, validResponse, resolveConfig,
+    edit(id, value) { fields[id].value = value; fields[id].listeners.input(); },
+    posts: () => requests.filter(request => request.options.method === "POST")
+  };
+}
+
+test("configuration is a credential-free GET, and Start waits for the configured Function URL", async () => {
+  const ui = accessHarness({ deferConfig: true });
+  const starting = ui.access.getSession({ transport: "websocket" });
+  assert.equal(ui.posts().length, 0);
+  assert.equal(ui.requests[0].url, "https://demo.example/api/demo-config");
+  assert.deepEqual(ui.requests[0].options.headers, { Accept: "application/json" });
+  assert.equal(ui.requests[0].options.credentials, "omit");
+  assert.equal(ui.requests[0].options.redirect, "error");
+  ui.resolveConfig({ ok: true, json: async () => ({ function_url: "https://function.example/api/realtime-access" }) });
+  const session = await starting;
+  assert.equal(ui.posts()[0].url, "https://function.example/api/realtime-access");
+  assert.equal(session.connectFrame.access_key, "relay-secret");
+  assert.equal(ui.posts()[0].options.headers["x-demo-key"], undefined);
+});
+
+test("manual Function configuration bypasses pending defaults and is never overwritten", async () => {
+  const ui = accessHarness({ deferConfig: true });
+  ui.edit("functionUrl", "http://localhost:7071/api/realtime-access");
+  ui.edit("functionKey", "local-function-secret");
+  const session = await ui.access.getSession({ transport: "websocket" });
+  assert.equal(ui.posts()[0].url, "http://localhost:7071/api/realtime-access");
+  assert.equal(ui.posts()[0].options.headers["x-functions-key"], "local-function-secret");
+  assert.equal(session.connectFrame.access_key, "relay-secret");
+  assert.doesNotMatch(JSON.stringify(session.connectFrame), /local-function-secret/);
+  ui.resolveConfig({ ok: true, json: async () => ({ function_url: "https://function.example/api/realtime-access" }) });
+  await ui.access.ready;
+  assert.equal(ui.fields.functionUrl.value, "http://localhost:7071/api/realtime-access");
+  assert.equal(ui.fields.functionKey.value, "local-function-secret");
+});
+
+test("configuration failure, invalid defaults, and static hosting require explicit manual configuration", async () => {
+  for (const config of [
+    { ok: false, status: 503 }, { ok: false, status: 404 },
+    { ok: true, json: async () => { throw new Error("HTML response"); } },
+    ...["", "/api/realtime-access", "https://demo.example/api/realtime-access",
+      "http://remote.example/api", "https://function.example/api?code=secret",
+      "https://function.example/api?token=secret", "https://name:secret@function.example/api"].map(function_url => ({
+      ok: true, json: async () => ({ function_url })
+    }))
+  ]) {
+    const ui = accessHarness({ config });
+    await ui.access.ready;
+    assert.equal(ui.fields.functionUrl.value, "");
+    assert.match(ui.fields.configStatus.textContent, /取得できません.*手動入力/);
+    assert.doesNotMatch(ui.fields.configStatus.textContent, /secret/);
+    await assert.rejects(ui.access.getSession({ transport: "websocket" }), /手動入力/);
+    assert.equal(ui.posts().length, 0);
+    ui.edit("functionUrl", "https://manual.example/api/realtime-access");
+    ui.edit("functionKey", "manual-key");
+    await ui.access.getSession({ transport: "websocket" });
+    assert.equal(ui.posts()[0].url, "https://manual.example/api/realtime-access");
+  }
+});
+
+test("file-hosted pages do not fetch a default but allow a manually specified local Function", async () => {
+  const ui = accessHarness({ pageUrl: "file:///C:/demo/index.html" });
+  await ui.access.ready;
+  assert.equal(ui.requests.length, 0);
+  assert.match(ui.fields.configStatus.textContent, /手動入力/);
+  ui.edit("functionUrl", "http://127.0.0.1:7071/api/realtime-access");
+  await ui.access.getSession({ transport: "websocket" });
+  assert.equal(ui.posts()[0].url, "http://127.0.0.1:7071/api/realtime-access");
+});
+
+test("changing Function destination clears only its key and requires re-entry before sending", async () => {
+  const ui = accessHarness({ url: "https://first.example/api", functionKey: "first-secret" });
+  await ui.access.ready;
+  ui.edit("functionUrl", "https://second.example/api");
+  assert.equal(ui.fields.functionKey.value, "");
+  assert.equal(ui.fields.demoKey.value, "relay-secret");
+  await assert.rejects(ui.access.getSession({ transport: "websocket" }), /再入力/);
+  assert.equal(ui.posts().length, 0);
+  ui.edit("functionKey", "second-secret");
+  await ui.access.getSession({ transport: "websocket" });
+  assert.equal(ui.posts()[0].options.headers["x-functions-key"], "second-secret");
+  assert.doesNotMatch(JSON.stringify(ui.posts()), /first-secret|relay-secret/);
+  ui.fields.functionUrl.value = "https://third.example/api";
+  await assert.rejects(ui.access.getSession({ transport: "websocket" }), /再入力/);
+  assert.equal(ui.posts().length, 1);
+});
+
+test("credentials entered before the default URL loads are not sent to the newly loaded destination", async () => {
+  const ui = accessHarness({ deferConfig: true });
+  ui.edit("functionKey", "unbound-secret");
+  const starting = ui.access.getSession({ transport: "websocket" });
+  ui.resolveConfig({ ok: true, json: async () => ({ function_url: "https://function.example/api" }) });
+  await assert.rejects(starting, /再入力/);
+  assert.equal(ui.posts().length, 0);
+  assert.equal(ui.fields.functionKey.value, "");
+  ui.edit("functionKey", "confirmed-secret");
+  await ui.access.getSession({ transport: "websocket" });
+  assert.equal(ui.posts()[0].options.headers["x-functions-key"], "confirmed-secret");
+});
+
+test("editing the target while Start awaits configuration requires an explicit second Start", async () => {
+  const ui = accessHarness({ deferConfig: true });
+  const starting = ui.access.getSession({ transport: "websocket" });
+  ui.edit("functionUrl", "https://manual.example/api");
+  ui.edit("functionKey", "manual-secret");
+  ui.resolveConfig({ ok: true, json: async () => ({ function_url: "https://function.example/api" }) });
+  await assert.rejects(starting, /もう一度開始/);
+  assert.equal(ui.posts().length, 0);
+  await ui.access.getSession({ transport: "websocket" });
+  assert.equal(ui.posts()[0].url, "https://manual.example/api");
+});
+
+test("Function response requires a valid token, transport, endpoint, and any supplied expiry", async () => {
+  const valid = accessHarness().validResponse;
+  for (const change of [
+    { ephemeral_token: "" }, { ephemeral_token: null }, { ephemeral_token: "   " },
+    { ephemeral_token: 123 }, { ephemeral_token: "relay-secret" }, { ephemeral_token: "function-secret" },
+    { transport: "webrtc" }, { transport: undefined }, { realtime_url: undefined },
+    { realtime_url: "https://example.openai.azure.com/openai/v1/realtime" },
+    { realtime_url: "wss://example.test?token=ephemeral-secret" },
+    { realtime_url: "wss://example.test/function-secret" },
+    { expires_at: 1 }, { expires_at: "future" }, { expires_at: Infinity }, { expires_at: 0 }
+  ]) {
+    const ui = accessHarness({
+      url: "https://function.example/api", functionKey: "function-secret", response: { ...valid, ...change }
+    });
+    await assert.rejects(ui.access.getSession({ transport: "websocket" }));
+  }
+  for (const expires_at of [null, undefined, Date.now() / 1000 + 60]) {
+    const ui = accessHarness({ url: "https://function.example/api", response: { ...valid, expires_at } });
+    assert.equal((await ui.access.getSession({ transport: "websocket" })).token, valid.ephemeral_token);
+  }
 });

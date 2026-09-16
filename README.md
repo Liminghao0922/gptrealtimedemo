@@ -2,11 +2,26 @@
 
 This sample contains:
 
-- A unified Node.js host for three browser demos, a Realtime client-secret API,
-  and a WebSocket relay. It supports local development and Azure App Service F1.
-- The existing standalone Python Azure Function, retained as an optional
-  alternative token issuer. Existing Function and Static Web App deployments are
-  not removed by the unified deployment.
+- A Node.js host for three browser demos, public runtime configuration, and a
+  WebSocket relay. It supports local development and Azure App Service F1.
+- The existing Python Azure Function as the **only Realtime token issuer**.
+  App Service does not issue tokens or proxy token requests to the Function.
+
+**Cutover status (2026-09-16):** the architecture below is approved.
+Host/configuration/packaging changes are implemented. **58 frontend tests and the
+integrated 109 Node + 8 Python tests passed** (separate suite results, not additive
+totals). The retained Function is **restored and available
+for token issuance**: live checks passed for bad key 401, invalid transport 400,
+WebRTC 200, and WebSocket 200. Local native Edge audio checks passed for all three
+pages, with input ASR checked only on map and WebSocket, **not livevoice**.
+**Production deployment and fresh hosted acceptance passed for all three pages**.
+The production host is <https://app-realtime-f1-mh0922.azurewebsites.net/>.
+The strengthened hosted gate passed again on all three pages: a response created
+**after actual `input_audio_buffer.committed`** completed and audio was received.
+Map and WebSocket also had nonempty input-ASR completions. Credential isolation
+and Stop cleanup passed. Livevoice input ASR remains disabled.
+F1 Free and the Function identity's Azure OpenAI
+resource-scoped **Cognitive Services OpenAI User** role were reconfirmed.
 
 ## Developer documentation (Japanese)
 
@@ -14,45 +29,71 @@ This sample contains:
   and tests to reference when building a direct non-browser WebSocket client,
   and which parts are specific to the browser demo or unified App Service host.
 
-## Unified App Service demo
+## App Service pages and relay / Function token issuer
 
 Deployed entry point: **https://app-realtime-f1-mh0922.azurewebsites.net/**
 
-All pages default to the same-origin `/api/realtime-access`. On App Service,
-enter the shared **Demo access key** configured in `DEMO_ACCESS_KEY`. It is not
-embedded in the pages or saved to browser persistent storage. Authorized Azure
-operators can retrieve or rotate it in the app's **Settings > Environment
-variables**; distribute it through a private channel, not a URL.
+All three pages load an editable Function API URL from same-origin
+`GET /api/demo-config`, which returns `{"function_url":"<Function URL>"}`.
+The Node host reads this nonsecret URL from `FUNCTION_ACCESS_URL`; no key is
+included. Pages POST **directly to the Function** using `x-functions-key`.
+
+| Setting | Approved existing target |
+| --- | --- |
+| Function App | `func-robotics-v2` / Japan East / Python 3.13 / system-assigned managed identity |
+| Function API URL / `FUNCTION_ACCESS_URL` | `https://func-robotics-v2-e6ftfkgmhvb8c9b4.japaneast-01.azurewebsites.net/api/realtime-access` |
+| Resource group / subscription | `rg-pec-robotics` / `a5095cf8-c1ec-4a7e-9ee7-22103870844b` |
+| App Service | `app-realtime-f1-mh0922` / Japan East / Linux F1 / Node 24 |
+| Azure OpenAI endpoint | `https://aoai-robotics.openai.azure.com/` / East US 2 |
+| Realtime / input transcription deployments | `gpt-realtime-2.1-mini` / `gpt-4o-mini-transcribe` |
+
+The Azure OpenAI target is unchanged. After the App Service update, its former
+`/api/realtime-access` returns **HTTP 410**, not a redirect. Update stored
+client URLs explicitly; neither key is forwarded from that retired route.
 
 ### Which token does each transport use?
 
 Both browser transports use the **ephemeral client secret returned by
 `/openai/v1/realtime/client_secrets`**:
 
-1. The browser authenticates to the demo API with the Demo key in `x-demo-key`.
-2. The server uses its managed identity (Entra access token) to call Azure's
+1. The browser authenticates to the Python Function with its Function key in
+   `x-functions-key`.
+2. The Function uses its managed identity (Entra access token) to call Azure's
    `client_secrets` endpoint. The Entra token stays on the server.
 3. WebRTC sends the resulting ephemeral secret as a Bearer token with the SDP
    request to `/openai/v1/realtime/calls`. Media flows directly to Azure.
-4. WebSocket sends the ephemeral secret and Demo key in the first same-origin
+4. Browser WebSocket additionally sends the ephemeral secret and **Demo key**
+   (`access_key`) in the first same-origin
    WSS `connect` frame. The relay validates the key and the configured resource/
    deployment, then adds `Authorization: Bearer <ephemeral secret>` upstream.
 
-The Demo key is **not** an Azure credential. The optional standalone Function key
-only authorizes calls to that Function. The direct CLI's `--auth entra` and
+**WebRTC needs only the Function key; browser WebSocket needs both keys.**
+The Function key never goes to the relay; the Demo key never goes to the
+Function. The Demo key is **not** an Azure credential and authorizes only the
+browser relay's `connect` frame. Direct non-browser clients use the Function
+key and returned ephemeral secret, with **no Demo key or relay**.
+
+`DEMO_ACCESS_KEY` remains in the App Service environment for relay access.
+Authorized operators can retrieve or rotate it in **Settings > Environment
+variables**. Obtain the Function key from the Function App's function keys.
+Share keys privately, not in URLs, source, or browser persistent storage.
+The direct CLI's `--auth entra` and
 `--auth api-key` modes are separate authentication comparisons, not the browser
 default. `expires_at` comes from Azure; the app does not assume a fixed lifetime.
 
 ### Free-tier boundaries
 
-The unified deployment uses **Linux F1 / Node 24 LTS**, one process, HTTPS, and no
-paid supporting services. App Service hosting is free; **Azure OpenAI Realtime,
-transcription and any separate TTS calls remain billable**.
+The web host uses **Linux F1 / Node 24 LTS**, one process, and HTTPS.
+App Service hosting is free; the retained Function has its own hosting costs.
+**Azure OpenAI Realtime, transcription and any separate TTS calls remain billable**.
 
 - F1 supports five concurrent WebSockets, but this demo deliberately permits
-  only **two active relays**, each for at most **15 minutes**.
-- Authorized token issuance is limited to **12 requests/minute globally** and
-  two in-flight requests. Quota errors are visible; there is no model/SKU fallback.
+  only **two active relays**, each for at most **15 minutes**, with a **1 MiB**
+  payload/buffer limit.
+- The Python Function has no application-level issuance rate/concurrency limiter.
+  The former Node issuer's 12 requests/minute and two in-flight requests **do not
+  apply to the Function**. Azure quotas and Function platform limits still apply.
+  Quota errors are visible; there is no model/SKU fallback.
 - F1 has no Always On or SLA, 60 CPU minutes/day, three CPU minutes per five-minute
   interval, and a published 165 MB/day outgoing bandwidth limit. CPU time is not
   connection duration. Audio relay traffic can exhaust the bandwidth allowance.
@@ -66,20 +107,21 @@ Official limits: [Linux WebSocket support](https://learn.microsoft.com/azure/app
 
 ### Run the unified host locally
 
-Use Node.js 22+ (the deployed runtime is Node 24), Azure CLI authentication, and
-an identity with **Cognitive Services OpenAI User** on the selected Azure OpenAI
-resource. No Python Function host is required for this path.
+Use Node.js 22+ (the deployed runtime is Node 24). The Node host does not obtain
+Azure credentials. Use either the retained deployed Function or a local Python
+Function host for issuance; the Azure endpoint/deployment below pin relay targets.
 
 ```powershell
-az login
-$env:AOAI_ENDPOINT = "https://<your-resource>.openai.azure.com"
-$env:AOAI_REALTIME_DEPLOYMENT = "<your-realtime-deployment>"
+$env:FUNCTION_ACCESS_URL = "https://func-robotics-v2-e6ftfkgmhvb8c9b4.japaneast-01.azurewebsites.net/api/realtime-access"
+$env:AOAI_ENDPOINT = "https://aoai-robotics.openai.azure.com"
+$env:AOAI_REALTIME_DEPLOYMENT = "gpt-realtime-2.1-mini"
 npm --prefix .\webapp ci
 npm --prefix .\webapp start
 ```
 
-Open `http://localhost:8000`. Local development uses `DefaultAzureCredential`;
-App Service uses `ManagedIdentityCredential` deterministically. Without a local
+Open `http://localhost:8000`, enter the Function key, and allow this exact local
+origin in the deployed Function's CORS settings. Keep the relay endpoint/deployment
+consistent with the Function's returned URL. Without a local
 `DEMO_ACCESS_KEY`, the key field may be empty and the server is loopback-only.
 To test key protection locally, set `DEMO_ACCESS_KEY` to a private 32–1024 character
 printable non-space ASCII value before starting. The cloud host fails startup
@@ -91,7 +133,25 @@ Only the allowlisted public HTML/JavaScript files are served. Source, dependenci
 tests, settings and CLI tools are not public routes. `/health` checks the process,
 not model availability; full audio verification is a separate step.
 
-### Deploy the unified F1 app
+For a local Function, set `FUNCTION_ACCESS_URL` to
+`http://localhost:7071/api/realtime-access`. Local HTTP is permitted only for
+loopback development. In production the setting must be a separate HTTPS
+Function URL without credentials, query parameters, or a fragment. The default
+is editable in each page; a static-only server has no `/api/demo-config`, so
+enter the Function URL manually.
+
+### Deployment options for the existing F1 app
+
+For this cutover, a targeted `FUNCTION_ACCESS_URL` setting update plus ZIP
+deployment is the selected path to preserve all other existing settings,
+identities, and RBAC without ARM/Bicep template reprovisioning. The targeted
+`FUNCTION_ACCESS_URL` update and **9-file ZIP deployment completed**, and fresh
+hosted acceptance passed for all three pages. No full ARM apply was used.
+
+The maintained script below is a separate **validated AVM reprovisioning and ZIP
+deployment** path, not a settings-only update. It still requires
+`-FunctionAccessUrl` along with the existing arguments. Review its full ARM
+change scope before selecting that path.
 
 The separate `infra/appservice.bicep` and `scripts/deploy-appservice.ps1` path
 does not deploy the legacy `azure.yaml` Function/SWA configuration. The script
@@ -103,11 +163,15 @@ for arbitrary subscriptions. The existing Azure OpenAI account is unchanged.
 # The script securely prompts for a 32-1024 character Demo key.
 # Without -Deploy it validates only; no cloud resources are created or updated.
 .\scripts\deploy-appservice.ps1 `
-  -AoaiRealtimeDeployment "gpt-realtime-2.1-mini" -ValidateOnly
+  -AoaiRealtimeDeployment "gpt-realtime-2.1-mini" `
+  -FunctionAccessUrl "https://func-robotics-v2-e6ftfkgmhvb8c9b4.japaneast-01.azurewebsites.net/api/realtime-access" `
+  -ValidateOnly
 
 # After reviewing validation and the target, provision and ZIP-deploy:
 .\scripts\deploy-appservice.ps1 `
-  -AoaiRealtimeDeployment "gpt-realtime-2.1-mini" -Deploy
+  -AoaiRealtimeDeployment "gpt-realtime-2.1-mini" `
+  -FunctionAccessUrl "https://func-robotics-v2-e6ftfkgmhvb8c9b4.japaneast-01.azurewebsites.net/api/realtime-access" `
+  -Deploy
 ```
 
 Use the same key when redeploying unless intentionally rotating it. A supplied
@@ -116,14 +180,92 @@ otherwise the script prompts without echo. Temporary parameter files are
 access-restricted and removed after use. Never pass a real key as a command-line
 string or store it in repository files.
 
-The script uses Linux **F1 only**, Node 24, system-assigned managed identity and
-account-scoped **Cognitive Services OpenAI User**. It never falls back to a paid
-SKU. Publishing basic authentication and FTP are disabled. The nine-file ZIP
-contains only runtime files; Azure installs locked npm dependencies remotely.
+`-FunctionAccessUrl` is required, nonsecret, and becomes `FUNCTION_ACCESS_URL`.
+The script uses Linux **F1 only** and Node 24. Existing App Service
+system-assigned identity and account-scoped **Cognitive Services OpenAI User**
+RBAC are preserved for this cutover but **not used for token issuance**.
+It never falls back to a paid SKU. Publishing basic authentication and FTP are
+disabled. The ZIP contains only runtime files, including `demo-config.cjs`
+instead of the removed `realtime-access.cjs`; Node no longer depends on
+`@azure/identity`. Azure installs locked npm dependencies remotely.
 Validation/provisioning requires ARM deployment permissions and permission to
 create that role assignment at the Azure OpenAI account scope.
 
-### Deployed verification (2026-09-16)
+The existing Function is not recreated by this deployment. Append
+`https://app-realtime-f1-mh0922.azurewebsites.net` to its CORS allowlist,
+**preserving every existing origin**. Do not add a path, trailing slash, or wildcard.
+For a Function code update, use the existing-app Core Tools procedure below.
+
+### Restored Function token-API verification
+
+Live checks against the retained Function passed on 2026-09-16:
+
+| Check | Observed result |
+| --- | --- |
+| Invalid Function key | HTTP 401 |
+| Invalid transport with valid key | HTTP 400 |
+| WebRTC token request | HTTP 200, token present, correct `/openai/v1/realtime/calls` URL |
+| WebSocket token request | HTTP 200, token present, correct Azure WSS URL and deployment |
+
+Both successful responses had approximately **7,199 seconds** remaining.
+Always use the returned `expires_at`; this is an observation, not a fixed TTL
+guarantee. These are token-API tests, not new audio or browser success evidence.
+The F1 CORS origin was appended **with every existing origin preserved**.
+
+Resolved deployment prerequisite: disabled public network access on the
+existing deployment/runtime storage caused startup failure and the Core Tools
+Flex `StorageAccessibleCheck` storage 403. The explicitly approved fix restored
+**only** `rgpecrobotics8a4a`'s `publicNetworkAccess=Enabled`, while retaining
+`allowBlobPublicAccess=false` and `allowSharedKeyAccess=false`. Existing managed
+identities, RBAC, SKUs, and models are unchanged. This is a network-reachability
+fix for this environment, not permission to enable anonymous blob access,
+shared-key authentication, or relax other environments' controls.
+
+### Current local validation (2026-09-16)
+
+- Frontend suite: **58 tests passed**.
+- Integrated offline suite: **109 Node + 8 Python tests passed**. Do not add the
+  frontend suite count to this total.
+- Local native Edge WebRTC checks passed on livevoice and map: incoming audio,
+  completed responses, and cleanup.
+- **Livevoice does not enable input ASR**; no input-transcription success is
+  claimed for that page in this run.
+- Map requested `gpt-4o-mini-transcribe` with language `ja` and produced a
+  **17-character input transcript**. This is a functional observation, not an
+  accuracy benchmark.
+- The separate local WebSocket page check passed mini-transcribe input ASR,
+  AI output audio, Function/relay key isolation, and cleanup.
+
+These checks used the local host, not the newly deployed App Service. They do
+not replace hosted acceptance or direct Python/device verification.
+
+### Production deployment and hosted acceptance — PASSED (2026-09-16)
+
+The targeted `FUNCTION_ACCESS_URL` update and 9-file ZIP deployment completed
+without a full ARM apply. Fresh acceptance at
+<https://app-realtime-f1-mh0922.azurewebsites.net/> passed for **all three pages**:
+
+- Real tokens were obtained directly from the retained Python Function.
+- The strengthened full-audio gate passed again on every page: a response
+  created **after actual `input_audio_buffer.committed`** reached completed
+  status and audio was received. A greeting alone cannot satisfy this gate.
+- Map and WebSocket both produced nonempty input-ASR completions with
+  `gpt-4o-mini-transcribe`. This fresh run resolves the earlier hosted map
+  snapshot's missing ASR evidence. **Livevoice input ASR remained disabled**.
+- Stop cleanup passed on all three pages.
+- Function/relay key isolation passed: the Function key went only to the
+  Function; the relay Demo key was separate. WebRTC needed no Demo key.
+- App Service **F1 Free** was reconfirmed, and the Function identity's
+  **Cognitive Services OpenAI User** role at the Azure OpenAI resource scope
+  was verified. Existing identities, RBAC, SKUs, and models were preserved.
+
+This is fresh hosted evidence, not a reuse of the local or original-issuer
+results. It does not certify direct Python/device behavior or production load.
+
+### Historical deployed verification (2026-09-16, original Node issuer)
+
+These checks preceded the Function-only cutover and describe the old deployment,
+not the current post-cutover acceptance status.
 
 - Verified the actual plan is **F1 / Free**, Japan East, capacity 1; the app runs
   `NODE|24-lts`, Always On is disabled, FTP is disabled, and minimum TLS is 1.2.
@@ -164,7 +306,7 @@ Function/SWA resources were not deleted or updated by this deployment.
 |   |-- gpt-realtime_function_call_map.html
 |   |-- gpt-realtime-websocket-demo.html
 |   |-- server.cjs
-|   |-- realtime-access.cjs
+|   |-- demo-config.cjs
 |   |-- package.json
 |-- infra/
 |   |-- ...
@@ -172,12 +314,12 @@ Function/SWA resources were not deleted or updated by this deployment.
 |-- README.md
 ```
 
-## Optional standalone Function: prerequisites
+## Python Function issuer: prerequisites
 
-- Python 3.14 or another version supported by Azure Functions
+- Python 3.13 (matching the retained `func-robotics-v2` runtime)
 - Azure Functions Core Tools v4
 - Azure CLI
-- Azure Developer CLI (`azd`)
+- Azure Developer CLI (`azd`) only for the separate legacy provisioning path
 - An Azure OpenAI resource with a deployed Realtime model
 
 For local authentication, sign in with an identity that can invoke the model:
@@ -188,7 +330,7 @@ az login
 
 The identity must have the **Cognitive Services OpenAI User** role on the Azure OpenAI resource.
 
-## Optional standalone Function: local settings
+## Python Function issuer: local settings
 
 Update `api/local.settings.json`:
 
@@ -207,7 +349,7 @@ Update `api/local.settings.json`:
 
 `local.settings.json` is for local development only. Configure the same environment variables as Function App application settings after deployment.
 
-## Optional standalone Function: dependencies
+## Python Function issuer: dependencies
 
 From the project root:
 
@@ -218,7 +360,7 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-## Optional standalone Function: run locally
+## Python Function issuer: run locally
 
 Open one PowerShell terminal and start the Function host with CORS enabled for the local web server:
 
@@ -232,6 +374,7 @@ to serve all demos, including the local WebSocket relay:
 
 ```powershell
 cd webapp
+$env:FUNCTION_ACCESS_URL = "http://localhost:7071/api/realtime-access"
 npm install
 npm start
 ```
@@ -257,8 +400,8 @@ The WebSocket test demo is available at:
 http://localhost:8000/gpt-realtime-websocket-demo.html
 ```
 
-All pages now default to the unified same-origin API. To use the standalone
-Function instead, explicitly select its API URL, for example
+All three pages use the Function URL published by `/api/demo-config` as an
+editable default. For static-only WebRTC hosting, explicitly enter
 `http://localhost:7071/api/realtime-access`.
 
 - The Function key field can be left empty when using the local Functions host.
@@ -285,9 +428,10 @@ token to the relay in its initial message; the relay adds the header for the
 Azure connection. Tokens are not placed in URLs, stored, or logged by the relay.
 Local mode binds to loopback and accepts the matching localhost origin.
 App Service mode accepts the configured HTTPS origin, requires the Demo key on
-the relay, and pins the configured Azure resource and deployment. An external
-Function can still serve the loopback workflow; the hosted demo uses its own
-issuer/key to avoid mixing credentials. A static-only deployment cannot run the
+the relay, and pins the configured Azure resource and deployment. Both local and
+hosted pages get tokens directly from the selected Python Function. Its key is
+never included in a relay frame, and the relay Demo key is never sent to the
+Function. A static-only deployment cannot run the
 relay. This remains a non-production test tool.
 
 Non-browser WebSocket clients can connect directly to `websocket_url` using the
@@ -453,7 +597,7 @@ recordings.
 | Area | Executable verification / evidence | Validation boundary |
 | --- | --- | --- |
 | Authentication and endpoints | Verify client-secret response shapes, independent Bearer/API-key modes, Azure WSS host/path and encoded deployment | WebRTC success alone does not prove WebSocket acceptance. Never turn a Function URL into an Azure URL or forward its key |
-| Token API and access controls | Request/response/error contracts, key normalization, exact origin/host, issuance limits and redacted exports | Node and legacy Function contracts differ. Offline tests alone do not prove deployed host authentication |
+| Token API and access controls | Function contracts/key authentication, public runtime config, retired route, relay origin/key checks and redacted exports | Node no longer issues tokens. Function host authentication and CORS require deployed verification; old Node issuance limits do not apply |
 | Session configuration | Initial voice/instructions, observed `session.updated`, GA audio/VAD settings and deployment selection | UI changes need a new session unless explicitly sent. Issuer location does not establish model location or inference residency |
 | Audio transport and playback | Fixed WAV resampling from 16 to 24 kHz, paced upload, VAD/manual commit and microphone gating | Browser and file tests do not validate device drivers, acoustic echo handling or physical playback |
 | Transcription and events | Off / Whisper / GPT / custom-deployment A/B, input/assistant correlation, late completion and event-shape checks | A greeting or accepted configuration is not a transcription test. One deployment's success is not a universal permission or quota rule |
@@ -463,13 +607,19 @@ recordings.
 
 For the Function POST, use `Content-Type: application/json` and, when deployed,
 `x-functions-key: <Function key>`. A minimal WebSocket request is
-`{"transport":"websocket","voice":"coral","instructions":"Respond in Japanese."}`.
+`{"transport":"websocket"}`; `voice` and `instructions` are optional.
 Successful responses normally use HTTP 200 and contain `transport`,
 `realtime_url`, `websocket_url`, `model`, `ephemeral_token`, `expires_at` and the
-upstream `session` object. Existing empty-body calls continue to select WebRTC.
+upstream raw `session` object; there is no `token_source` field. Do not log the
+raw response, as `session` can also contain secrets. Empty/non-JSON bodies and
+`{}` currently select WebRTC unless transport is explicitly provided (the
+Function also accepts a transport query parameter). Always send explicit JSON
+`transport: "websocket"` for a WebSocket client.
 Invalid transports return `{"error":"..."}` with 400; Azure errors retain their
 status with `{"error":"Azure OpenAI returned an error","details":{...}}`;
-missing configuration/authentication returns 500 and network failure returns 502.
+missing configuration/server-identity authentication returns 500 and network
+failure returns 502. Function-key authentication is performed by the Functions
+host, whose error body need not match the handler's JSON.
 
 The Function does not implement application-level request quotas. Azure resource
 quotas, Function platform limits, concurrent-session limits, deployment region,
@@ -487,7 +637,11 @@ npm --prefix .\webapp test
 .\api\.venv\Scripts\python.exe -m unittest discover -s .\api -p test_function_app.py -v
 ```
 
-The latest offline test totals are listed in **Deployed verification** above.
+Historical offline totals are listed in **Historical deployed verification**
+above. **Current local validation** records the passing frontend and integrated
+suites and local browser checks. **Production deployment and hosted acceptance**
+records the fresh three-page pass. The four live Function checks are recorded
+separately above.
 Browser lifecycle regressions also cover the 300 ms playback tail, manual input
 pause, fresh token issuance on manual reconnect, and disabled-ASR display.
 
@@ -495,7 +649,7 @@ The optional VS Code task **realtime: local experiment server** serves the brows
 experiments on port `8123` instead of `8000` to avoid colliding with another demo.
 If using this task, include `http://localhost:8123` in the Function CORS allowlist.
 
-### Observed live results (2026-09-16)
+### Historical observed live results (2026-09-16, before cutover)
 
 These are observations on the locally configured **`gpt-realtime-2.1-mini`**
 deployment, **not a certification of other deployments or model versions**:
@@ -547,7 +701,21 @@ Official references:
 - [Realtime WebRTC and client secrets](https://learn.microsoft.com/azure/ai-foundry/openai/how-to/realtime-audio-webrtc)
 - [Azure OpenAI audio API](https://learn.microsoft.com/azure/ai-foundry/openai/reference-preview)
 
-## Deploy the Function to Azure
+## Update the retained Function (Core Tools)
+
+Use [the Azure Functions deployment guide](docs/azure-functions-portal-ja.md),
+especially **steps 4 and 5**, to publish the `api` project to the existing
+`func-robotics-v2`. Skip resource creation; preserve its Python 3.13 runtime,
+system-assigned identity, existing settings, and Azure OpenAI target. Steps 7/8
+of that guide are **browser WebRTC** testing, not direct Python WebSocket testing.
+Direct clients need neither browser CORS nor a local web server.
+
+The retained Function uses managed identity, not a browser-supplied Azure key.
+The exact F1 origin has been appended to its existing CORS allowlist, preserving
+previous values. Function token issuance, the App Service production deployment,
+and fresh hosted browser/audio acceptance for all three pages have passed.
+
+## Separate legacy AZD provisioning path (not this cutover)
 
 The included AZD/Bicep infrastructure deploys a Python 3.14 Flex Consumption Function App, storage, monitoring, and a user-assigned managed identity. It also grants that identity **Cognitive Services User** on the configured Azure OpenAI resource.
 
@@ -568,7 +736,12 @@ After deployment, use the `SERVICE_API_URI` output followed by `/api/realtime-ac
 
 ## Azure permissions
 
-The deployment creates a user-assigned managed identity and assigns it the **Cognitive Services User** role scoped to the Azure OpenAI resource. This is the minimum Azure OpenAI runtime role required by this sample.
+The legacy AZD deployment above creates a user-assigned managed identity and
+assigns **Cognitive Services User** at the Azure OpenAI resource scope. This is
+not the identity model of the retained `func-robotics-v2`, which uses its existing
+system-assigned identity. Do not recreate resources or replace identities to
+perform the approved cutover. Preserve App Service identity/RBAC; it is unused
+by the pages/relay for token issuance.
 
 The person or deployment pipeline assigning that role also needs permission to create Azure role assignments, such as **Role Based Access Control Administrator** at the appropriate scope.
 

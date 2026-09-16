@@ -1,8 +1,37 @@
-api/.venv/
-api/__pycache__/
-api/.azurite/
-api/local.settings.json
+# Local Python and Azure Functions state
+**/.venv/
+**/__pycache__/
+**/.python_packages/
 *.py[cod]
+**/local.settings.json
+
+# Local secrets and publishing credentials
+.env
+.env.*
+!.env.example
+*.publishsettings
+*.pfx
+*.p12
+*.pem
+*.key
+
+# Azurite state (can be created at the workspace root or under api/)
+**/.azurite/
+**/__azurite_db*__.json
+**/__blobstorage__/
+**/__queuestorage__/
+**/__tablestorage__/
+
+# Dependencies, test output, logs, and deployment packages
 webapp/node_modules/
+coverage/
+.nyc_output/
+*.log
+*.zip
+
+# Local Azure deployment plans and validation output
 .azure/*
-docs/customer-answers-ja.md
+
+# Customer-specific material and sanitized acceptance evidence stay outside Git
+**/customer-*.md
+function-cutover-*.json

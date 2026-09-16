@@ -1,6 +1,6 @@
 targetScope = 'resourceGroup'
 
-@description('Name of the new unified Linux web app. Existing Function and Static Web Apps are untouched.')
+@description('Name of the Linux page and relay host. The separate Function issues tokens.')
 param appName string = 'app-realtime-f1-mh0922'
 
 @description('Name of the Free F1 Linux App Service plan. There is no paid SKU parameter or fallback.')
@@ -18,6 +18,10 @@ param aoaiAccountName string = 'aoai-robotics'
 @description('Name of the existing realtime model deployment. No model or account changes are made.')
 @minLength(1)
 param aoaiRealtimeDeployment string
+
+@description('Nonsecret HTTPS token API URL of the existing Function. Do not include a Function key or query parameters.')
+@minLength(1)
+param functionAccessUrl string
 
 @description('Demo access key. Supply through a protected temporary parameters file, never a command-line value.')
 @secure()
@@ -124,6 +128,7 @@ resource appSettings 'Microsoft.Web/sites/config@2025-03-01' = {
   properties: {
     AOAI_ENDPOINT: aoai.properties.endpoint
     AOAI_REALTIME_DEPLOYMENT: aoaiRealtimeDeployment
+    FUNCTION_ACCESS_URL: functionAccessUrl
     DEMO_ACCESS_KEY: demoAccessKey
     NODE_ENV: 'production'
     SCM_DO_BUILD_DURING_DEPLOYMENT: 'true'
@@ -140,6 +145,7 @@ var openAiUserRoleId = subscriptionResourceId(
   '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd'
 )
 
+// Preserve this existing assignment during the issuer cutover; the relay does not use it.
 // An extension resource is required for this exact existing-account scope.
 // A stable account/app/role GUID makes repeated incremental deployments idempotent.
 resource openAiUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = {

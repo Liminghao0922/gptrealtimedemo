@@ -1,8 +1,12 @@
 # Azure OpenAI Realtime: 開発者向けコードガイド
 
-確認日: 2026年9月16日  
+更新日: 2026年9月16日
 関連資料: [README](../README.md)  
 デモ入口: <https://app-realtime-f1-mh0922.azurewebsites.net/>
+
+**切替状況（2026年9月16日）:** 既存 Python Function は**復旧し、トークン発行に利用可能**です。実 Function で不正キー401・不正 transport 400・WebRTC 200・WebSocket 200の4確認が合格し、両成功応答の残り期限は約7,199秒でした。Function CORS の F1 オリジン追加も既存値を保持して完了しています。**App Service 本番公開と、強化した公開後の3ページ音声受入試験が合格**しました。全ページで実入力の `input_audio_buffer.committed` 後に作成された応答の completed・音声受信、キー分離、Stop cleanup を確認しています。公開先の地図 / WebSocket は空でない入力 ASR 完了も確認しました。**livevoice は入力 ASR を有効にしていません**。
+
+host / config / packaging は実装済みです。最新の試験結果は frontend 58件、統合 Node 109件 + Python 8件がすべて合格です。frontend の件数を統合結果に加算しません。過去の音声実測、今回の Function API・ローカルブラウザー実測、新しい公開後検証を区別します。復旧に関する運用上の前提は [README](../README.md) を参照してください。既存 ID・RBAC・SKU・モデルは変更していません。
 
 ## 1. 最初に読むコード
 
@@ -18,8 +22,9 @@
 | GA session 設定を作る | [realtime-experiments.js](../webapp/realtime-experiments.js) | `DEFAULT_PRESET`、`buildSessionUpdate` |
 | 入力 ASR と AI 応答の完了判定 | [customer-probe.cjs](../webapp/customer-probe.cjs) | `validateEvent`、`EventCollector` |
 | 接続し直す・認証を比較する | [customer-probe.cjs](../webapp/customer-probe.cjs) | `runWithAuth`、`execute`、`loadConfig` |
-| 自社サーバーで secret を発行 | [realtime-access.cjs](../webapp/realtime-access.cjs) | `readConfig`、`normalizeRequest`、`createTokenIssuer`、`AccessError` |
-| 自社 API の認証・制限 | [server.cjs](../webapp/server.cjs) | `createDemoServer`、`readJson`、`keyMatches` |
+| Function で secret を発行 | [function_app.py](../api/function_app.py) | `realtime_access`、`_get_aoai_auth_headers`、`_get_realtime_urls` |
+| Web ホストの公開設定・接続先検証 | [demo-config.cjs](../webapp/demo-config.cjs) | `readConfig`、`azureEndpoint`、`functionAccessUrl` |
+| 公開設定 API・relay の認証・制限 | [server.cjs](../webapp/server.cjs) | `createDemoServer`、`validateConnection`、`keyMatches` |
 | ブラウザーの転写表示・ログ | [realtime-experiments.js](../webapp/realtime-experiments.js) | `ExperimentRecorder`、`redact`、`createBrowserAccess` |
 | マイク送信停止・再生完了待ち | [WebSocket ページ](../webapp/gpt-realtime-websocket-demo.html) | `startAudioCapture`、`playAudioChunk`、`handleEvent`、`stop` |
 | ブラウザー WebRTC | [音声ページ](../webapp/gpt-realtime-livevoice-demo.html) | `start`、`stop` |
@@ -57,30 +62,47 @@
 
 **Function の HTTPS URL を WSS に置換しないでください。** 発行 API と Azure の音声 endpoint は別です。
 
-CLI の既定は ephemeral です。`PROBE_FUNCTION_URL` / `PROBE_FUNCTION_KEY` という既存の環境変数名を維持していますが、現在の統合 API にも接続できます。この場合、KEY の値は **Demo key** です。CLI は `x-functions-key` を送信し、Node host が互換ヘッダーとして受け付けます。新規の自社クライアントから統合 API を呼ぶなら `x-demo-key` を使ってください。
+CLI の既定は ephemeral です。`PROBE_FUNCTION_URL` は **Python Function の URL**、`PROBE_FUNCTION_KEY` はその **Function key** です。`issueToken` は `x-functions-key` を送信します。直接接続に Demo key や relay は不要です。App Service 更新後、旧 `/api/realtime-access` は **HTTP 410** で廃止し、Function へリダイレクトも代理転送もしません。URL とキーを明示的に切り替えてください。
 
 Entra 直接接続では `PROBE_ENTRA_TOKEN`、API key 方式では `AOAI_API_KEY` を使います。**CLI は Entra token を自動取得・更新しません。** 本番の資格情報取得・更新は認証ライブラリ等を使って別途実装してください。
 
-### 発行サーバー側
+### 発行サーバー側：既存 Python Function のみ
 
-[realtime-access.cjs](../webapp/realtime-access.cjs) の `createTokenIssuer` は以下を実装します。
+[function_app.py](../api/function_app.py) の `realtime_access` が唯一の発行処理です。**端末用 Python 音声クライアントではなく、サーバー側の実装**です。
 
-1. `normalizeRequest` で JSON object、transport、voice / instructions を検証。
-2. Azure 上は `ManagedIdentityCredential`、ローカルは `DefaultAzureCredential` を使用。
-3. この実装では scope `https://cognitiveservices.azure.com/.default` でサーバー用 Entra token を取得。
-4. `/openai/v1/realtime/client_secrets` に初期 session を POST。
-5. Azure 応答の secret が非空で、`expires_at` が将来の数値であることを確認。
-6. クライアント用 secret と URL を返す。サーバーの Entra token は返さない。
+1. Function key は Azure Functions ホストが検証。
+2. `_get_transport` で WebRTC / WebSocket を選択し、任意の voice / instructions を初期 session に反映。
+3. `_get_aoai_auth_headers` は `AOAI_API_KEY` があればサーバー側で使用し、なければ `DefaultAzureCredential` で scope `https://cognitiveservices.azure.com/.default` の Entra token を取得。今回の既存 Function はシステム割り当てマネージド ID を使用。
+4. `/openai/v1/realtime/client_secrets` に POST。
+5. Azure 応答から `ephemeral_token` / `expires_at` を取り出し、選択した URL、model、transport、raw `session` とともに返す。`token_source` は返さない。
 
-`readConfig` はクラウドの必須設定不足を起動エラーにします。現在のマネージド ID には Azure OpenAI リソース単位で Cognitive Services OpenAI User を付与しています。
+Function は取得値を返すため、**クライアントも secret が非空で期限が将来であることを検証**してください。サーバー用 Entra token は返しませんが、raw `session` 内にも ephemeral secret があるため、応答全体のログ保存は禁止してください。
 
-[server.cjs](../webapp/server.cjs) の `createDemoServer` は HTTP 側の Demo key / Host / Origin 検証、body 上限、発行回数を担当します。**空 body は400、`{}` は WebRTC**です。上流429は429、それ以外の Azure HTTP エラーは502と `azure_http_<status>` に変換します。旧 Function と完全に同じエラー契約ではありません。正確な条件は [HTTP host のテスト](../webapp/server.test.cjs) と [issuer のテスト](../webapp/realtime-access.test.cjs) を参照してください。
+| 条件 | 既存 Function の契約（今回変更なし） |
+| --- | --- |
+| 最小 WebSocket POST | `{"transport":"websocket"}`。`voice` / `instructions` は任意 |
+| 空 body / 非 JSON / `{}` | WebRTC が既定。transport query も受け付けるが、WebSocket は JSON に明示する |
+| 不正な transport | 400、`{"error":"transport must be either 'webrtc' or 'websocket'"}` |
+| Azure 上流 HTTP エラー | 元の status を維持し、`{"error":"Azure OpenAI returned an error","details":...}` |
+| 設定不足 / サーバー認証取得失敗 | 500 |
+| Azure へのネットワーク失敗 | 502 |
+| Function key の不足・不一致 | Functions ホストの認証エラー。handler と同じ JSON 形式とは限らない |
 
-### Python サーバーを採用する場合の別案
+旧 Node issuer の毎分12回・同時発行2件・16 KiB body 検証・エラー変換を Function の仕様として扱いません。Function コードにアプリ独自の発行回数制御はありませんが、Azure のクォータと Function プラットフォーム制限は適用されます。契約の参照先は [test_function_app.py](../api/test_function_app.py) です。
 
-[function_app.py](../api/function_app.py) の `realtime_access` は、Python で同じ Azure client-secret API を呼ぶ参考です。`_get_aoai_auth_headers` と `_get_realtime_urls` で認証・URL 構成を確認できます。
+### Web ホストの役割と公開設定
 
-これは**端末用 Python WebSocket クライアントではなく、既存の Azure Function バックエンド**です。現在の統合サイトは Node で稼働しています。旧 Function は空 body の処理、入力検証、上流エラーの公開方法、レート制限が異なるため、本番用には Node 側の厳格な契約も併せて参照してください。
+App Service はページと `/realtime-relay` を維持し、`GET /api/demo-config` で `{"function_url":"<Function URL>"}` を返します。[demo-config.cjs](../webapp/demo-config.cjs) の `readConfig`、`azureEndpoint`、`functionAccessUrl` が環境設定を検証します。`FUNCTION_ACCESS_URL` はキーなしの公開 URL で、3ページの編集可能な既定値になります。ページから Function へ直接 POST し、App Service は代理送信しません。Node の `realtime-access.cjs` と `@azure/identity` 依存は廃止します。
+
+| 設定 | 承認済みの既存リソース |
+| --- | --- |
+| Function | `func-robotics-v2`、Japan East、Python 3.13、システム割り当てマネージド ID |
+| `FUNCTION_ACCESS_URL` | `https://func-robotics-v2-e6ftfkgmhvb8c9b4.japaneast-01.azurewebsites.net/api/realtime-access` |
+| RG / subscription | `rg-pec-robotics` / `a5095cf8-c1ec-4a7e-9ee7-22103870844b` |
+| Azure OpenAI | `https://aoai-robotics.openai.azure.com/`、East US 2 |
+| Realtime / ASR | `gpt-realtime-2.1-mini` / `gpt-4o-mini-transcribe`（変更なし） |
+
+ブラウザーの Function POST は `x-functions-key` のみで認証し、Demo key は送信しません。WebRTC は Function key だけで利用し、WebSocket ページは relay 接続用に別途 Demo key を使用します。Function key を relay に渡してはいけません。
 
 ## 4. GA 設定と readiness
 
@@ -133,7 +155,7 @@ Entra 直接接続では `PROBE_ENTRA_TOKEN`、API key 方式では `AOAI_API_KE
 | 出力音声 | output_audio delta / done、受信バイト数 | `EventCollector.accept`、`outcomes` |
 | 保存・表示 | 入力、AI 字幕、失敗、実測設定を別々に出力 | `EventCollector.evidence`、`ExperimentRecorder.snapshot` |
 
-入力 ASR は Realtime が音声を理解する処理とは別です。今回、ASR が `DeploymentNotFound` でも AI 音声は成功し、ASR off でも対話は成功しました。
+入力 ASR は Realtime が音声を理解する処理とは別です。2026年9月16日の切替前の試験では、ASR が `DeploymentNotFound` でも AI 音声は成功し、ASR off でも対話は成功しました。
 
 **`response.done` で全処理が終わったと判定しないでください。** `EventCollector.complete` は、観測した全入力 item の ASR 終端、進行中の speech / response の有無を追います。`runSession` はさらに upload 終了、出力音声 delta / done、最後の関連イベントから1,200 msの quiet period を確認します。この待機時間は試験終了のための実装値であり、サービスの最大遅延保証ではありません。常時対話アプリは1ターン完了ごとに socket を閉じる必要はありません。
 
@@ -173,10 +195,10 @@ AI の `response.done` や `response.output_audio.done` は、実スピーカー
 [server.cjs](../webapp/server.cjs) の `validateConnection` と `createDemoServer` が担当します。
 
 - ブラウザー → `/realtime-relay` に WSS 接続。
-- 最初の `connect` フレームで Azure URL、ephemeral token、`access_key` を渡す。
+- 最初の `connect` フレームで Azure URL、ephemeral token、Demo key を `access_key` として渡す。Function key は渡さない。
 - Host / Origin / key / Azure リソース / deployment を検証。
 - サーバー → Azure に Bearer ヘッダーを付け、イベントを双方向転送。
-- 最大2 active relay、15分の独自上限、buffer 上限、timeout、切断時の上流 cleanup。
+- 最大2 active relay、15分の独自上限、1 MiB の payload/buffer 上限、timeout、切断時の上流 cleanup。旧 Node issuer の発行制限とは別。
 
 これはブラウザーのヘッダー制約を補う層です。Python から Azure へ直接接続する際に `connect` / `relay.ready` / `relay.error` を送受信する必要はありません。いずれも Azure の標準イベントではありません。
 
@@ -202,7 +224,11 @@ AI の `response.done` や `response.output_audio.done` は、実スピーカー
 
 `networkProbe` は社内 proxy の自動設定まで行いません。TLS 検証を無効にせず、実機ネットワークに合わせて認証付き proxy、DNS、接続維持を確認してください。
 
-デモの [appservice.bicep](../infra/appservice.bicep) は Linux F1 / Node24 / system-assigned identity と、既存 Azure OpenAI account に限定した RBAC の参照です。[deploy-appservice.ps1](../scripts/deploy-appservice.ps1) はデモ環境を `ValidateSet` で固定しています。**別環境へそのまま実行する汎用デプロイスクリプトではありません。** 実環境に合わせたレビューが必要です。旧 [azure.yaml](../azure.yaml) は別の Function / SWA 経路です。
+デモの [appservice.bicep](../infra/appservice.bicep) は Linux F1 / Node24 を維持します。既存 App Service の system-assigned identity と Azure OpenAI account に限定した RBAC は今回削除せず保持しますが、トークン発行には使用しません。[deploy-appservice.ps1](../scripts/deploy-appservice.ps1) は既存引数に加えて非秘密の `-FunctionAccessUrl` が必須です。対象を `ValidateSet` で固定しているため、**別環境へそのまま実行する汎用デプロイスクリプトではありません。** 旧 [azure.yaml](../azure.yaml) は別の Function / SWA 経路であり、今回のリソース再作成に使いません。
+
+今回の App Service 切替は、他の既存設定・ID・RBAC を保持し、`FUNCTION_ACCESS_URL` の対象設定のみの更新と9ファイルの ZIP 公開で完了しました。full ARM apply は実施していません。上記スクリプトは引き続き検証付き AVM 再プロビジョニングを提供する**別の経路**で、設定のみの更新と同一ではありません。ARM テンプレートの変更範囲を確認して選択してください。公開後の3ページ受入試験も合格しています。
+
+既存 Function への反映は [Azure Functions デプロイ手順](azure-functions-portal-ja.md) の Core Tools による**手順4/5**を参照し、リソース作成は省略します。同資料の手順7/8はブラウザー WebRTC の確認であり、直接 Python / WebSocket の手順ではありません。ブラウザー切替では Function の既存 CORS 値を残し、`https://app-realtime-f1-mh0922.azurewebsites.net` を追加します。ローカル Web ホストでも `FUNCTION_ACCESS_URL` を使えます。設定例は [README](../README.md) を参照してください。
 
 ## 10. 手元での確認手順
 
@@ -214,12 +240,12 @@ AI の `response.done` や `response.output_audio.done` は、実スピーカー
 node .\webapp\customer-probe.cjs --help
 ```
 
-### 現在の統合 API から secret を取得し、Azure へ直接接続
+### 既存 Function から secret を取得し、Azure へ直接接続
 
-`PROBE_FUNCTION_KEY` には認可された Demo key を安全な方法で設定しておいてください。コマンドライン引数やファイルへの直書きは不要です。環境に `AOAI_ENDPOINT` / `AOAI_REALTIME_DEPLOYMENT` が残っている場合は発行 API の返す値と一致する必要があります。
+`PROBE_FUNCTION_KEY` には対象 Function の Function key を安全な方法で設定しておいてください。**Demo key は使いません。** コマンドライン引数やファイルへの直書きは不要です。環境に `AOAI_ENDPOINT` / `AOAI_REALTIME_DEPLOYMENT` が残っている場合は発行 API の返す値と一致する必要があります。下記の切替後の実環境検証結果は未確定です。
 
 ```powershell
-$env:PROBE_FUNCTION_URL = 'https://app-realtime-f1-mh0922.azurewebsites.net/api/realtime-access'
+$env:PROBE_FUNCTION_URL = 'https://func-robotics-v2-e6ftfkgmhvb8c9b4.japaneast-01.azurewebsites.net/api/realtime-access'
 node .\webapp\customer-probe.cjs inspect --omit-session-model
 node .\webapp\customer-probe.cjs audio --omit-session-model --transcription gpt-4o-mini-transcribe --wav .\assets\transcription-ja-16k.wav
 node .\webapp\customer-probe.cjs audio --omit-session-model --transcription off --wav .\assets\transcription-ja-16k.wav
@@ -266,11 +292,12 @@ Realtime secret を暗黙に使い回しません。`tts --negative-ephemeral` �
 
 | 検証対象 | テスト |
 | --- | --- |
-| issuer、戻り値、expiry、URL、独立認証 | [customer-probe.test.cjs](../webapp/customer-probe.test.cjs)、[realtime-access.test.cjs](../webapp/realtime-access.test.cjs) |
+| Function 戻り値、expiry、URL、独立認証 | [customer-probe.test.cjs](../webapp/customer-probe.test.cjs)、[test_function_app.py](../api/test_function_app.py) |
+| 公開 Function URL・Azure endpoint・起動設定 | [demo-config.test.cjs](../webapp/demo-config.test.cjs) |
 | PCM / resample / VAD / manual commit / readiness | [customer-probe.test.cjs](../webapp/customer-probe.test.cjs)、[realtime-experiments.test.cjs](../webapp/realtime-experiments.test.cjs) |
 | late ASR、全 item、failed と音声成功、イベント構造 | [customer-probe.test.cjs](../webapp/customer-probe.test.cjs)、[realtime-experiments.test.cjs](../webapp/realtime-experiments.test.cjs) |
 | 応答中・再生中・300 ms tail・pause・再接続 | [websocket-ui.test.cjs](../webapp/websocket-ui.test.cjs) |
-| Demo key / Origin / Host / 12回 / 同時発行2件 / relay2接続 | [server.test.cjs](../webapp/server.test.cjs) |
+| 公開設定・旧 route の410・Demo key / Origin / Host / relay2接続 | [server.test.cjs](../webapp/server.test.cjs) |
 | ブラウザー共通認証・WebRTC cleanup・map のイベント順序 | [browser-ui.test.cjs](../webapp/browser-ui.test.cjs) |
 | key 正規化・network 分類・TTS の独立認証 | [customer-probe.test.cjs](../webapp/customer-probe.test.cjs) |
 | 既存 Python Function の契約 | [test_function_app.py](../api/test_function_app.py) |
@@ -284,7 +311,19 @@ npm --prefix .\webapp test
 .\api\.venv\Scripts\python.exe -m unittest discover -s .\api -p test_function_app.py -v
 ```
 
-2026年9月16日の検証結果は **Node 95件 + Python 8件が合格**です。オンラインでは Node / Entra 直接音声試験、統合 relay の新規2セッション、実ブラウザー3ページの合成マイクによる入力転写・AI 応答・Stop を確認しました。
+**歴史的証跡（2026年9月16日、元の構成）:** Node 95件 + Python 8件が合格。Node / Entra 直接音声試験、旧 Node 発行元の relay 2セッション、実ブラウザー3ページの入力転写・AI 応答・Stop を確認しました。当時の livevoice には試験側から ASR を追加設定しており、既定動作でも今回の試験条件でもありません。
+
+**今回の検証結果:** frontend 58件、統合 Node 109件 + Python 8件がすべて合格。実 Function のキー・transport・両方式の発行の4確認も合格しました。さらにローカルのネイティブ Edge で以下を確認しました。
+
+| ページ | 今回のローカル実測 |
+| --- | --- |
+| livevoice / WebRTC | 受信音声、応答完了、cleanup が合格。**入力 ASR は有効化しておらず、ASR 成功は主張しない** |
+| 地図 / WebRTC | 受信音声、応答完了、cleanup が合格。`gpt-4o-mini-transcribe` / `ja` を要求し、17文字の入力転写を観測 |
+| WebSocket（独立試験） | mini-transcribe 入力 ASR、AI 音声、Function / relay のキー分離、cleanup が合格 |
+
+これはローカルホストからの試験で、公開先 App Service の確認でも直接 Python / 実機の試験でもありません。
+
+**本番公開・強化した公開後音声受入: 全3ページ合格（2026年9月16日）。** `FUNCTION_ACCESS_URL` の対象設定更新 + 9ファイルの ZIP 公開が完了し、<https://app-realtime-f1-mh0922.azurewebsites.net/> で実 Function トークンを使って確認しました。最新のゲートは全ページで、**実入力の `input_audio_buffer.committed` 後に作成された応答**の completed と音声受信を必須とし、挨拶だけでは合格しません。地図 / WebSocket は `gpt-4o-mini-transcribe` による空でない入力 ASR 完了も必須とし、両方合格しました。以前の地図 snapshot の証跡不足は、この新しい公開先試験で解消しています。全ページの資格情報分離・Stop cleanup も合格し、livevoice の入力 ASR は無効のままです。App Service の **F1 Free** と、Function ID の Azure OpenAI リソースに限定した **Cognitive Services OpenAI User** ロールも確認済みです。full ARM apply は実施せず、既存 ID・RBAC・SKU・モデルを保持しています。この公開後実測も、直接 Python / 実機や本番負荷の確認を代替しません。
 
 Python への移植後も「接続できた」だけでなく、次を受入条件にしてください。
 

@@ -61,6 +61,9 @@
     }
     const functionKey = key || queryKeys[0];
     url.searchParams.delete("code");
+    if ([...url.searchParams.keys()].some(credentialQueryKey)) {
+      throw new Error("キー・トークンは URL ではなく専用のキー欄に入力してください。");
+    }
     const headers = { "Content-Type": "application/json" };
     if (functionKey) headers["x-functions-key"] = functionKey;
     return { url: url.href, options: {
@@ -97,25 +100,17 @@
   }
 
   function browserAccessRequest(baseUrl, { demoKey = "", functionKey = "" }, body, pageUrl) {
-    if (!baseUrl.trim()) throw new Error("アクセス API URL を入力してください。");
-    const url = new URL(baseUrl, pageUrl);
+    if (!baseUrl.trim()) throw new Error("Function URL を入力してください。");
+    const url = new URL(baseUrl);
     const sameOrigin = url.origin === new URL(pageUrl).origin;
-    if (sameOrigin) {
-      if (url.pathname !== "/api/realtime-access" || url.search || url.hash || url.username || url.password) {
-        throw new Error("Demo キーの送信先は同一オリジンの /api/realtime-access のみです。URL にキーを含めないでください。");
-      }
-      const request = functionRequest(url.href, "", body);
-      if (demoKey) request.options.headers["x-demo-key"] = demoKey;
-      return { ...request, sameOrigin, accessKey: demoKey };
+    if (sameOrigin && url.pathname.replace(/\/+$/, "") === "/api/realtime-access") {
+      throw new Error("同一ホストのトークン発行 API は廃止されました。Azure Function の絶対 URL を指定してください。");
     }
     const request = functionRequest(url.href, functionKey, body);
-    if ([...new URL(request.url).searchParams.keys()].some(credentialQueryKey)) {
-      throw new Error("キー・トークンは URL ではなく専用のキー欄に入力してください。");
-    }
     if (demoKey && request.options.headers["x-functions-key"] === demoKey) {
-      throw new Error("Demo キーを外部 URL に送信することはできません。外部 Function 専用キーを使用してください。");
+      throw new Error("Demo キーはリレー専用です。Function には別の Function キーを使用してください。");
     }
-    return { ...request, sameOrigin: false };
+    return { ...request, sameOrigin };
   }
 
   function validateRealtimeUrl(value, transport) {
@@ -132,30 +127,122 @@
     const urlInput = document.getElementById("functionUrl");
     const demoInput = document.getElementById("demoKey");
     const functionInput = document.getElementById("functionKey");
+    const configStatus = document.getElementById("configStatus");
     const secrets = new Set();
+    let editedUrl = false;
+    let urlRevision = 0;
+    let configuredTarget = null;
+    let needsKeyReview = false;
+    function targetOf(value) {
+      try {
+        const url = new URL(value);
+        url.searchParams.delete("code");
+        return url.href;
+      } catch { return null; }
+    }
+    let keyTarget = targetOf(urlInput.value.trim());
     function remember(value) {
       if (typeof value === "string" && value) secrets.add(value);
     }
     function safe(value) {
-      remember(demoInput.value.trim());
+      remember(demoInput?.value.trim());
       remember(functionInput.value.trim());
+      try {
+        const url = new URL(urlInput.value);
+        for (const [key, value] of url.searchParams) {
+          if (credentialQueryKey(key)) remember(value);
+        }
+      } catch {}
       return redact(value, [...secrets]);
     }
-    async function getSession(body) {
-      const demoKey = demoInput.value.trim();
-      const functionKey = functionInput.value.trim();
-      remember(demoKey);
-      remember(functionKey);
+    function showConfig(message) {
+      if (configStatus) configStatus.textContent = safe(message);
+    }
+    function clearFunctionKey() {
+      if (functionInput.value) {
+        remember(functionInput.value.trim());
+        functionInput.value = "";
+        needsKeyReview = true;
+      }
+    }
+    urlInput.addEventListener("input", () => {
+      editedUrl = true;
+      urlRevision++;
+      const target = targetOf(urlInput.value.trim());
+      if (target !== keyTarget) clearFunctionKey();
+      keyTarget = target;
+      showConfig(needsKeyReview
+        ? "送信先が変更されたため Function キーを消去しました。URL を確認し、専用キーを再入力してください。"
+        : "手動設定：Function URL を確認してから専用キーを入力し、開始してください。");
+    });
+    functionInput.addEventListener("input", () => {
+      remember(functionInput.value.trim());
+      keyTarget = targetOf(urlInput.value.trim());
+      needsKeyReview = false;
+    });
+    async function loadConfig() {
+      showConfig("既定の Function URL を読み込み中です。別の Function URL を手動入力することもできます。");
       try {
-        const pastedUrl = new URL(urlInput.value, pageUrl);
-        for (const key of pastedUrl.searchParams.getAll("code")) remember(key);
+        const configUrl = new URL("/api/demo-config", pageUrl);
+        if (!["http:", "https:"].includes(configUrl.protocol)) throw new Error("静的ホスト");
+        const response = await fetchImpl(configUrl.href, {
+          method: "GET", headers: { Accept: "application/json" },
+          credentials: "omit", redirect: "error", cache: "no-store",
+          signal: AbortSignal.timeout(10000)
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        if (typeof data?.function_url !== "string") throw new Error("Function URL がありません");
+        const url = new URL(data.function_url);
+        if ([...url.searchParams.keys()].some(credentialQueryKey)) {
+          throw new Error("既定の URL に認証情報が含まれています");
+        }
+        const request = browserAccessRequest(url.href, {}, {}, pageUrl);
+        if (!editedUrl && !urlInput.value.trim()) {
+          clearFunctionKey();
+          urlInput.value = request.url;
+          configuredTarget = request.url;
+          keyTarget = request.url;
+          showConfig(needsKeyReview
+            ? "既定の Function URL を読み込みました。送信先を確認して Function キーを再入力してください。"
+            : "既定の Function URL を読み込みました。送信先を確認して専用キーを入力してください。");
+        } else {
+          showConfig("手動設定の Function URL を使用します。送信先と専用キーを確認してください。");
+        }
+      } catch {
+        showConfig("既定の Function URL を取得できません。Function の絶対 URL を手動入力し、送信先を確認して専用キーを入力してください。");
+      }
+    }
+    const ready = loadConfig();
+    async function getSession(body) {
+      try {
+        if (!["webrtc", "websocket"].includes(body.transport)) throw new Error("transport が不正です。");
+        if (!urlInput.value.trim()) {
+          const revision = urlRevision;
+          await ready;
+          if (revision !== urlRevision || (urlInput.value.trim() && urlInput.value.trim() !== configuredTarget)) {
+            throw new Error("Function URL が変更されました。設定を確認し、もう一度開始してください。");
+          }
+        }
+        if (!urlInput.value.trim()) throw new Error("既定の設定がありません。Function URL を手動入力してください。");
+        const demoKey = demoInput?.value.trim() || "";
+        safe("");
+        const target = targetOf(urlInput.value.trim());
+        if (keyTarget !== target) clearFunctionKey();
+        keyTarget = target;
+        if (needsKeyReview) {
+          throw new Error("送信先を確認し、Function キーを再入力してから開始してください。");
+        }
+        const functionKey = functionInput.value.trim();
         const request = browserAccessRequest(urlInput.value.trim(), { demoKey, functionKey }, body, pageUrl);
-        urlInput.value = request.sameOrigin ? "/api/realtime-access" : request.url;
-        if (!request.sameOrigin && request.options.headers["x-functions-key"]) {
+        urlInput.value = request.url;
+        keyTarget = request.url;
+        if (request.options.headers["x-functions-key"]) {
           functionInput.value = request.options.headers["x-functions-key"];
         }
+        remember(functionInput.value.trim());
         const response = await fetchImpl(request.url, {
-          ...request.options, signal: AbortSignal.timeout(20000)
+          ...request.options, credentials: "omit", signal: AbortSignal.timeout(20000)
         });
         let data;
         try {
@@ -163,7 +250,7 @@
         } catch {
           throw new Error(`アクセス API HTTP ${response.status}: JSON 応答を取得できませんでした。`);
         }
-        const token = data?.ephemeral_token || data?.session?.client_secret?.value;
+        const token = data?.ephemeral_token ?? data?.session?.client_secret?.value;
         remember(token);
         if (!response.ok) {
           throw new Error(`アクセス API HTTP ${response.status}: ${JSON.stringify(safe(data))}`);
@@ -171,16 +258,25 @@
         const transport = body.transport;
         const endpoint = data?.realtime_url ||
           (transport === "websocket" ? data?.websocket_url : data?.webrtc_url);
-        if (typeof token !== "string" || !token || typeof endpoint !== "string" ||
-            (transport === "websocket" ? data.transport !== transport : data.transport && data.transport !== transport)) {
+        if (typeof token !== "string" || !token.trim() || /\s/.test(token) ||
+            token === demoKey || token === request.options.headers["x-functions-key"] ||
+            typeof endpoint !== "string" || data.transport !== transport) {
           throw new Error("アクセス API の応答に必要な一時トークン・接続 URL・transport がありません。");
         }
+        const expiresAt = data.expires_at ?? data.session?.client_secret?.expires_at ?? null;
+        if (expiresAt !== null && (!Number.isFinite(expiresAt) || expiresAt <= Date.now() / 1000)) {
+          throw new Error("一時トークンの有効期限が不正、または期限切れです。もう一度取得してください。");
+        }
         const realtimeUrl = validateRealtimeUrl(endpoint, transport);
+        if ([demoKey, request.options.headers["x-functions-key"], token].filter(Boolean)
+          .some(secret => realtimeUrl.includes(secret) || realtimeUrl.includes(encodeURIComponent(secret)))) {
+          throw new Error("Realtime 接続 URL に認証情報を含めることはできません。");
+        }
         const info = safe({
           functionUrl: request.url, transport, tokenKind: "realtime_ephemeral_client_secret",
           issuerPath: "/openai/v1/realtime/client_secrets",
           tokenSource: typeof data.token_source === "string" ? data.token_source : null,
-          expiresAt: data.expires_at ?? null, deployment: data.model,
+          expiresAt, deployment: data.model,
           realtimeUrl, functionHttpStatus: response.status,
           note: "ブラウザーは client_secrets の短期トークンを使用します。Entra 認証はバックエンドのみです。"
         });
@@ -188,15 +284,14 @@
           token, webrtcUrl: transport === "webrtc" ? realtimeUrl : undefined,
           websocketUrl: transport === "websocket" ? realtimeUrl : undefined, info,
           connectFrame: transport === "websocket" ? {
-            type: "connect", url: realtimeUrl, token,
-            ...(request.sameOrigin ? { access_key: request.accessKey } : {})
+            type: "connect", url: realtimeUrl, token, access_key: demoKey
           } : undefined
         };
       } catch (error) {
         throw new Error(safe(error?.message || String(error)));
       }
     }
-    return { getSession, safe };
+    return { getSession, safe, ready };
   }
 
   class ExperimentRecorder {

@@ -3,7 +3,7 @@
 .SYNOPSIS
 Creates an allowlisted, dependency-free ZIP for the App Service Oryx remote build.
 .DESCRIPTION
-RuntimeDirectory and WebRoot both default to webapp (the current unified runtime). ZIP entries are
+RuntimeDirectory and WebRoot both default to webapp (the page and relay runtime). ZIP entries are
 flat because server.cjs serves public files from __dirname. Does not run npm or
 include tests, probes, node_modules, local settings, .env files, or repository data.
 The deployment sets SCM_DO_BUILD_DURING_DEPLOYMENT=true and NODE_ENV=production.
@@ -31,7 +31,7 @@ foreach ($directory in @($RuntimeDirectory, $WebRoot)) {
     }
 }
 
-$runtimeFiles = @('server.cjs', 'realtime-access.cjs', 'package.json', 'package-lock.json')
+$runtimeFiles = @('server.cjs', 'demo-config.cjs', 'package.json', 'package-lock.json')
 $publicFiles = @(
     'index.html',
     'gpt-realtime-livevoice-demo.html',

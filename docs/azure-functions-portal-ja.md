@@ -2,6 +2,10 @@
 
 このドキュメントでは、Azure Portal の画面を使って Azure Functions を作成し、このリポジトリの Python コードをデプロイします。Azure を初めて使う方でも進められるように、1 つずつ順番に説明します。
 
+**既存 Function を更新する場合:** リソースを作り直さず、手順4/5の Azure Functions Core Tools で `api` の最新版を既存 Function App に公開してください。手順2の新規作成は省略し、手順3は既存設定の確認に使います。既存のマネージド ID 認証を、コード更新だけを理由に API key 方式へ変更する必要はありません。保持するデモの `func-robotics-v2` は Python 3.13・システム割り当てマネージド ID です。
+
+**今回の役割分担:** トークン発行は Python Function のみ、App Service はページとブラウザー WebSocket relay のみです。2026年9月16日に本番公開と強化した公開後の3ページ音声受入試験が合格しました。実 Function トークンを使い、実入力の `input_audio_buffer.committed` 後に作成された応答の completed・音声受信、資格情報分離、Stop cleanup を全ページで確認しています。地図 / WebSocket の mini-transcribe は空でない入力 ASR 完了も合格しました。livevoice は入力 ASR を有効化していません。詳細は [README](../README.md) を参照してください。
+
 ## 作成するもの
 
 | リソース              | 役割                                               |
@@ -110,6 +114,8 @@ API キーはパスワードと同じです。コードやスクリーンショ�
 
 `AOAI_API_KEY` はアプリケーション設定にのみ保存します。ブラウザーのデモ画面には入力しません。
 
+既存のマネージド ID 構成では `AOAI_API_KEY` を追加せず、既存の ID と Azure OpenAI への権限を確認します。上表の API key 設定は、キー方式を採用する場合の説明です。
+
 ![アプリケーション設定](images/function-portal/app-settings.png)
 
 ## 手順 4. PC で準備する
@@ -156,6 +162,8 @@ Flex Consumption では、既定のホスト名に一意の文字列が付くこ
 
 ## 手順 7. Web 画面からの呼び出しを許可する
 
+手順7/8は**ブラウザーの WebRTC デモ**の手順です。Python から Azure へ直接 WebSocket 接続する場合、ブラウザー CORS やローカル Web サーバーは不要です。[開発者向けコードガイド](developer-code-guide-ja.md) の直接接続手順を参照してください。
+
 ブラウザーは、許可されていない場所からの通信をブロックします。デモ画面を表示する場所（オリジン）を許可リストに追加します。
 
 まず、デモ画面を表示する方法を決めます。手軽に試す場合は、PC でローカル サーバーを起動します。`webapp` フォルダーで次のコマンドを実行します。
@@ -178,6 +186,8 @@ http://localhost:8000
 
 3. **保存** を選択します。
 
+既存の許可値は削除せず、必要なオリジンを追記してください。保持する F1 サイトの場合は `https://app-realtime-f1-mh0922.azurewebsites.net` を追加します。ブラウザーは App Service 経由ではなく Function に直接 POST します。
+
 ![CORS の設定](images/function-portal/cors.png)
 
 末尾にスラッシュやページ名は付けません。`http://` または `https://` から始まるドメイン部分（ポート番号があれば含む）だけを入力します。
@@ -185,6 +195,8 @@ http://localhost:8000
 ## 手順 8. 動作を確認する
 
 ブラウザーのデモ画面を開き、**Function API URL** と **Function Key** に手順 6 の値を入力します。マイクの使用を許可すると、音声セッションを開始できます。
+
+Node ホスト上の3ページは `/api/demo-config` から Function URL の編集可能な既定値を読み込みます。この手順の静的ローカルサーバーでは手動入力します。WebRTC は **Function key のみ**を使用します。別の WebSocket デモ画面では relay 専用の Demo key も必要ですが、Function key は relay に、Demo key は Function に送信しません。旧 App Service `/api/realtime-access` は410で廃止され、リダイレクトされません。
 
 ![デモ画面](images/function-portal/web-demo.png)
 

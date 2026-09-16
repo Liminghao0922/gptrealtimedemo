@@ -12,8 +12,9 @@ const pages = [
 ];
 const source = file => fs.readFileSync(path.join(__dirname, file), "utf8");
 const normalize = value => JSON.parse(JSON.stringify(value));
+const defaultFunctionUrl = "https://function.example/api/realtime-access";
 
-function browserHarness(file, { error, response, sdpError } = {}) {
+function browserHarness(file, { error, response, sdpError, configError, deferredConfig } = {}) {
   const html = source(file);
   const elements = new Map();
   function element() {
@@ -43,6 +44,7 @@ function browserHarness(file, { error, response, sdpError } = {}) {
     getElement(match[1]).value = (options.find(option => /\bselected\b/.test(option[0])) || options[0])[1];
   }
   const requests = [];
+  const configRequests = [];
   const sent = [];
   const peers = [];
   const tracks = [];
@@ -84,7 +86,10 @@ function browserHarness(file, { error, response, sdpError } = {}) {
       log: (...args) => consoleMessages.push(args),
       error: (...args) => consoleMessages.push(args)
     },
-    document: { getElementById: getElement, createElement: element, body },
+    document: {
+      getElementById: id => id === "demoKey" && !file.includes("websocket") ? null : getElement(id),
+      createElement: element, body
+    },
     window: { location: { href: `https://demo.azurewebsites.net/${file}` } },
     navigator: { mediaDevices: { getUserMedia: async () => {
       const track = { kind: "audio", enabled: true, stop() { this.stopped = true; } };
@@ -94,6 +99,14 @@ function browserHarness(file, { error, response, sdpError } = {}) {
     MediaStream: class { addTrack() {} },
     RTCPeerConnection: MockPeer,
     fetch: async (url, options) => {
+      if (url.endsWith("/api/demo-config")) {
+        configRequests.push({ url, options });
+        if (deferredConfig) return deferredConfig;
+        return {
+          ok: !configError, status: configError ? 503 : 200,
+          json: async () => ({ function_url: defaultFunctionUrl })
+        };
+      }
       requests.push({ url, options });
       if (options.headers["Content-Type"] === "application/sdp") {
         return { ok: !sdpError, status: sdpError ? 403 : 200, text: async () => sdpError || "mock-answer" };
@@ -103,7 +116,7 @@ function browserHarness(file, { error, response, sdpError } = {}) {
       return {
         ok: response?.ok ?? true, status: response?.status ?? 200,
         json: async () => response?.data ?? ({
-          transport, ephemeral_token: "ephemeral-secret", expires_at: 1234567890, model: "test",
+          transport, ephemeral_token: "ephemeral-secret", expires_at: Date.now() / 1000 + 60, model: "test",
           token_source: "client_secrets",
           [transport === "websocket" ? "websocket_url" : "webrtc_url"]: transport === "websocket"
             ? "wss://example.openai.azure.com/openai/v1/realtime?model=test"
@@ -117,9 +130,10 @@ function browserHarness(file, { error, response, sdpError } = {}) {
   for (const match of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
     vm.runInContext(match[1], context);
   }
-  getElement("demoKey").value = "demo-secret";
+  if (file.includes("websocket")) getElement("demoKey").value = "demo-secret";
   return {
-    html, getElement, requests, sent, peers, tracks, body, consoleMessages,
+    html, getElement, requests, configRequests, sent, peers, tracks, body, consoleMessages,
+    edit(id, value) { getElement(id).value = value; getElement(id).listeners.input?.(); },
     run: code => vm.runInContext(code, context),
     logs: () => getElement("events").textContent +
       getElement("logContainer").children.map(child => child.textContent).join("\n")
@@ -138,21 +152,26 @@ for (const file of [...pages, "index.html"]) {
 }
 
 for (const file of pages) {
-  test(`${file}: real page defaults use shared same-origin auth and no raw token response`, async () => {
+  test(`${file}: runtime default uses shared direct Function auth and no raw token response`, async () => {
     const ui = browserHarness(file);
-    assert.equal(ui.getElement("functionUrl").value, "/api/realtime-access");
+    assert.equal(ui.getElement("functionUrl").value, "");
+    await ui.run("access.ready");
+    assert.equal(ui.getElement("functionUrl").value, defaultFunctionUrl);
     assert.match(ui.html, /<script src="realtime-experiments\.js"><\/script>/);
-    for (const id of ["demoKey", "functionKey"]) {
+    for (const id of file.includes("websocket") ? ["demoKey", "functionKey"] : ["functionKey"]) {
       assert.match(ui.html, new RegExp(`<input id="${id}"[^>]*type="password"[^>]*autocomplete="off"`));
     }
-    ui.getElement("functionKey").value = "external-secret";
+    if (!file.includes("websocket")) assert.doesNotMatch(ui.html, /id="demoKey"/);
+    assert.equal(ui.configRequests[0].options.method, "GET");
+    assert.doesNotMatch(JSON.stringify(ui.configRequests), /demo-secret|external-secret/);
+    ui.edit("functionKey", "external-secret");
     const session = await ui.run("getEphemeralSession()");
     assert.equal(session.token, "ephemeral-secret");
     assert.equal(session.raw, undefined);
     const request = ui.requests[0];
-    assert.equal(request.url, "https://demo.azurewebsites.net/api/realtime-access");
-    assert.equal(request.options.headers["x-demo-key"], "demo-secret");
-    assert.equal(request.options.headers["x-functions-key"], undefined);
+    assert.equal(request.url, defaultFunctionUrl);
+    assert.equal(request.options.headers["x-demo-key"], undefined);
+    assert.equal(request.options.headers["x-functions-key"], "external-secret");
     assert.equal(request.options.redirect, "error");
     assert.doesNotMatch(request.url + request.options.body, /demo-secret|external-secret/);
     assert.equal(session.info.issuerPath, "/openai/v1/realtime/client_secrets");
@@ -163,28 +182,95 @@ for (const file of pages) {
 
   test(`${file}: external Function URL is opt-in and receives only its explicit header key`, async () => {
     const ui = browserHarness(file);
-    ui.getElement("functionUrl").value = "https://external.azurewebsites.net/api/realtime-access?code=external-secret";
+    ui.edit("functionUrl", "https://external.azurewebsites.net/api/realtime-access?code=external-secret");
     const session = await ui.run("getEphemeralSession()");
     assert.equal(ui.requests[0].options.headers["x-functions-key"], "external-secret");
     assert.equal(ui.requests[0].options.headers["x-demo-key"], undefined);
     assert.doesNotMatch(ui.requests[0].url, /secret|code=/);
     assert.equal(ui.getElement("functionUrl").value, "https://external.azurewebsites.net/api/realtime-access");
     assert.equal(ui.getElement("functionKey").value, "external-secret");
-    if (session.connectFrame) assert.equal(Object.hasOwn(session.connectFrame, "access_key"), false);
+    if (session.connectFrame) assert.equal(session.connectFrame.access_key, "demo-secret");
+  });
+
+  test(`${file}: unavailable runtime config is visible and a manual Function override remains usable`, async () => {
+    const ui = browserHarness(file, { configError: true });
+    await ui.run("access.ready");
+    assert.match(ui.getElement("configStatus").textContent, /取得できません.*手動入力/);
+    assert.equal(ui.getElement("functionUrl").value, "");
+    const start = file.includes("function_call_map") ? "startSession()" : "start()";
+    await ui.run(start);
+    assert.equal(ui.requests.length, 0);
+    assert.equal(ui.peers.length, 0);
+    assert.equal(ui.tracks.length, 0);
+    assert.equal(ui.getElement("startBtn").disabled, false);
+    ui.edit("functionUrl", "http://127.0.0.1:7071/api/realtime-access");
+    ui.edit("functionKey", "local-function-secret");
+    const session = await ui.run("getEphemeralSession()");
+    assert.equal(ui.requests[0].url, "http://127.0.0.1:7071/api/realtime-access");
+    assert.equal(ui.requests[0].options.headers["x-functions-key"], "local-function-secret");
+    assert.doesNotMatch(JSON.stringify(session.connectFrame || {}), /local-function-secret/);
+  });
+
+  test(`${file}: pending defaults do not replace a manually selected Function or its credentials`, async () => {
+    let resolveConfig;
+    const deferredConfig = new Promise(resolve => { resolveConfig = resolve; });
+    const ui = browserHarness(file, { deferredConfig });
+    ui.edit("functionUrl", "https://manual.example/api/realtime-access");
+    ui.edit("functionKey", "manual-secret");
+    await ui.run("getEphemeralSession()");
+    resolveConfig({ ok: true, json: async () => ({ function_url: defaultFunctionUrl }) });
+    await ui.run("access.ready");
+    assert.equal(ui.getElement("functionUrl").value, "https://manual.example/api/realtime-access");
+    assert.equal(ui.getElement("functionKey").value, "manual-secret");
+    assert.equal(ui.requests[0].url, "https://manual.example/api/realtime-access");
+  });
+
+  test(`${file}: retired token route and conflicting credentials never cause a credential-bearing request`, async () => {
+    const ui = browserHarness(file);
+    await ui.run("access.ready");
+    for (const [url, key] of [
+      ["/api/realtime-access", "function-secret"],
+      ["https://demo.azurewebsites.net/api/realtime-access", "function-secret"],
+      ["https://external.example/api?code=pasted-secret", "function-secret"],
+      ["https://external.example/api?code=one-secret&code=two-secret", ""],
+      ["https://external.example/api?access_key=bad-secret", ""]
+    ]) {
+      ui.edit("functionUrl", url);
+      ui.edit("functionKey", key);
+      await assert.rejects(ui.run("getEphemeralSession()"), error => {
+        assert.doesNotMatch(error.message, /function-secret|pasted-secret|one-secret|two-secret|bad-secret/);
+        return true;
+      });
+    }
+    assert.equal(ui.requests.length, 0);
+  });
+
+  test(`${file}: a missing token fails before microphone capture or a Realtime connection`, async () => {
+    const ui = browserHarness(file, { response: { data: {
+      transport: file.includes("websocket") ? "websocket" : "webrtc",
+      realtime_url: "https://example.openai.azure.com/openai/v1/realtime/calls"
+    } } });
+    const start = file.includes("function_call_map") ? "startSession()" : "start()";
+    await ui.run(start);
+    assert.equal(ui.peers.length, 0);
+    assert.equal(ui.tracks.length, 0);
+    assert.equal(ui.getElement("startBtn").disabled, false);
+    assert.match(ui.logs(), /一時トークン/);
   });
 
   test(`${file}: errors do not leak entered keys or echoed token fields`, async () => {
     for (const options of [
-      { error: "Failed request: demo-secret external-secret" },
+      { error: "Failed request: external-secret" },
       { response: { ok: false, status: 403, data: {
         ephemeral_token: "ephemeral-secret",
-        error: { message: "Denied demo-secret external-secret ephemeral-secret" },
+        error: { message: "Denied external-secret ephemeral-secret" },
         "x-demo-key": "unknown-secret", access_key: "unknown-secret"
       } } },
       { response: { data: { ephemeral_token: "ephemeral-secret", webrtc_url: "https://example.test?token=ephemeral-secret" } } }
     ]) {
       const ui = browserHarness(file, options);
-      ui.getElement("functionKey").value = "external-secret";
+      await ui.run("access.ready");
+      ui.edit("functionKey", "external-secret");
       const start = file.includes("function_call_map") ? "startSession()" : "start()";
       await ui.run(start);
       assert.doesNotMatch(ui.logs(), /demo-secret|external-secret|ephemeral-secret|unknown-secret/);
@@ -217,13 +303,18 @@ for (const file of pages.slice(0, 2)) {
   const stop = map ? "stopSession()" : "stop()";
   test(`${file}: WebRTC exchange uses only ephemeral authorization and cleans up for reconnect`, async () => {
     const ui = browserHarness(file);
+    await ui.run("access.ready");
+    ui.edit("functionKey", "function-secret");
     await ui.run(start);
     await nextTurn();
     assert.equal(ui.requests.length, 2);
+    assert.equal(ui.requests[0].url, defaultFunctionUrl);
+    assert.equal(ui.requests[0].options.headers["x-functions-key"], "function-secret");
     const sdp = ui.requests[1];
     assert.equal(sdp.options.headers.Authorization, "Bearer ephemeral-secret");
     assert.equal(sdp.options.headers["x-demo-key"], undefined);
     assert.equal(sdp.options.headers["x-functions-key"], undefined);
+    assert.doesNotMatch(JSON.stringify(sdp), /function-secret/);
     assert.equal(sdp.options.redirect, "error");
     assert.equal(ui.peers[0].answer.sdp, "mock-answer");
     assert.equal(ui.getElement("startBtn").disabled, true);
@@ -231,12 +322,13 @@ for (const file of pages.slice(0, 2)) {
     assert.equal(ui.sent.filter(event => event.type === "response.create").length, 1);
     ui.peers[0].channel.emit("message", { data: JSON.stringify({
       type: "error", error: {
-        code: "ExampleError", message: "echo demo-secret ephemeral-secret",
+        code: "ExampleError", message: "echo ephemeral-secret function-secret",
         "x-demo-key": "unknown-private-key", access_key: "unknown-private-key"
       }
     }) });
     assert.doesNotMatch(ui.logs(), /ephemeral-secret|demo-secret|unexpected-private-field/);
     assert.doesNotMatch(ui.logs(), /unknown-private-key/);
+    assert.doesNotMatch(ui.logs(), /function-secret/);
     await ui.run(start);
     assert.equal(ui.requests.length, 2, "a second click must not create a second microphone stream");
     await ui.run(stop);
@@ -253,7 +345,7 @@ for (const file of pages.slice(0, 2)) {
   });
 
   test(`${file}: failed SDP response is redacted and releases microphone/media resources`, async () => {
-    const ui = browserHarness(file, { sdpError: "echo demo-secret ephemeral-secret" });
+    const ui = browserHarness(file, { sdpError: "echo ephemeral-secret" });
     await ui.run(start);
     assert.equal(ui.tracks[0].stopped, true);
     assert.equal(ui.peers[0].closed, true);

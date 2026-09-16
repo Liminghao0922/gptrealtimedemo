@@ -7,7 +7,7 @@ const { setImmediate: nextTurn } = require("node:timers/promises");
 const RealtimeExperiments = require("./realtime-experiments.js");
 
 function browserHarness({
-  functionUrl = "/api/realtime-access", demoKey = "demo-secret", functionKey = "",
+  functionUrl = "", demoKey = "demo-secret", functionKey = "",
   deferSessionUpdated = false
 } = {}) {
   const elements = new Map();
@@ -31,6 +31,7 @@ function browserHarness({
   getElement("muteDuringPlayback").checked = true;
   const sent = [];
   const requests = [];
+  const configRequests = [];
   let connection;
   let audio;
   let tracksStopped = 0;
@@ -96,9 +97,16 @@ function browserHarness({
     }) } },
     AudioContext: MockAudioContext, WebSocket: MockSocket,
     fetch: async (url, options) => {
+      if (options.method === "GET") {
+        configRequests.push({ url, options });
+        return { ok: true, json: async () => ({
+          function_url: "https://function.example/api/realtime-access"
+        }) };
+      }
       requests.push({ url, options });
       return { ok: true, status: 200, json: async () => ({
         transport: "websocket", ephemeral_token: `test-token-${requests.length}`, model: "test",
+        expires_at: Date.now() / 1000 + 60,
         websocket_url: "wss://example.openai.azure.com/openai/v1/realtime?model=test"
       }) };
     }
@@ -107,7 +115,7 @@ function browserHarness({
   const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)][0][1];
   vm.runInContext(script, context);
   return {
-    run: code => vm.runInContext(code, context), sent, requests, getElement,
+    run: code => vm.runInContext(code, context), sent, requests, configRequests, getElement,
     emit: event => connection.emit(event),
     audio: () => audio,
     capture: () => audio.processor.onaudioprocess({
@@ -179,12 +187,16 @@ test("disabled transcription does not show an input item as waiting for ASR", as
   await ui.run("stop()");
 });
 
-test("same-origin API and first relay frame receive the Demo key, never a credential query", async () => {
-  const ui = browserHarness({ functionKey: "unused-function-secret" });
+test("direct Function receives only its key while the same-origin relay receives only the Demo key", async () => {
+  const ui = browserHarness();
+  await ui.run("access.ready");
+  ui.getElement("functionKey").value = "function-secret";
+  ui.getElement("functionKey").listeners.input();
   await ui.run("start()");
-  assert.equal(ui.requests[0].url, "http://localhost:8000/api/realtime-access");
-  assert.equal(ui.requests[0].options.headers["x-demo-key"], "demo-secret");
-  assert.equal(ui.requests[0].options.headers["x-functions-key"], undefined);
+  assert.equal(ui.configRequests[0].url, "http://localhost:8000/api/demo-config");
+  assert.equal(ui.requests[0].url, "https://function.example/api/realtime-access");
+  assert.equal(ui.requests[0].options.headers["x-demo-key"], undefined);
+  assert.equal(ui.requests[0].options.headers["x-functions-key"], "function-secret");
   const connect = ui.sent[0];
   assert.deepEqual(connect, {
     type: "connect",
@@ -193,18 +205,19 @@ test("same-origin API and first relay frame receive the Demo key, never a creden
   });
   assert.doesNotMatch(connect.url + ui.requests[0].url, /demo-secret|test-token-1/);
   assert.doesNotMatch(ui.getElement("events").textContent, /demo-secret|test-token-1/);
+  assert.doesNotMatch(JSON.stringify(ui.sent), /function-secret/);
   await ui.run("stop()");
 });
 
-test("external Function compatibility uses explicit Function key without relay access_key", async () => {
+test("alternate Function and pasted key retain independent relay access_key", async () => {
   const ui = browserHarness({
     functionUrl: "https://external.azurewebsites.net/api/realtime-access?code=function-secret"
   });
   await ui.run("start()");
   assert.equal(ui.requests[0].options.headers["x-functions-key"], "function-secret");
   assert.equal(ui.requests[0].options.headers["x-demo-key"], undefined);
-  assert.equal(Object.hasOwn(ui.sent[0], "access_key"), false);
-  assert.doesNotMatch(JSON.stringify(ui.sent), /demo-secret|function-secret/);
+  assert.equal(ui.sent[0].access_key, "demo-secret");
+  assert.doesNotMatch(JSON.stringify(ui.sent), /function-secret/);
   assert.doesNotMatch(ui.getElement("functionUrl").value, /code=|function-secret/);
   await ui.run("stop()");
 });

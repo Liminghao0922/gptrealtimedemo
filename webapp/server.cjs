@@ -3,14 +3,14 @@ const path = require("node:path");
 const { readFile } = require("node:fs/promises");
 const { createHash, timingSafeEqual } = require("node:crypto");
 const { WebSocket, WebSocketServer } = require("ws");
-const { AccessError, readConfig, createTokenIssuer } = require("./realtime-access.cjs");
+const { readConfig } = require("./demo-config.cjs");
 
 const MAX_BUFFERED_BYTES = 1024 * 1024;
 const PUBLIC_FILES = new Set([
   "index.html", "gpt-realtime-livevoice-demo.html", "gpt-realtime_function_call_map.html",
   "gpt-realtime-websocket-demo.html", "realtime-experiments.js"
 ]);
-const DEMO_LIMITS = { relays: 2, pending: 4, tokenRequests: 12, sessionMs: 15 * 60 * 1000 };
+const DEMO_LIMITS = { relays: 2, pending: 4, sessionMs: 15 * 60 * 1000 };
 
 function validateConnection(message, config = {}) {
   const { type, url, token, access_key: accessKey } = JSON.parse(message);
@@ -40,30 +40,10 @@ function keyMatches(actual, expected) {
   return timingSafeEqual(hash(actual), hash(expected));
 }
 
-async function readJson(req) {
-  let length = 0;
-  const chunks = [];
-  for await (const chunk of req.iterator({ destroyOnReturn: false })) {
-    length += chunk.length;
-    if (length > 16384) throw new AccessError(413, "body_too_large", "Request body exceeds 16 KiB.");
-    chunks.push(chunk);
-  }
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  } catch {
-    throw new AccessError(400, "invalid_json", "Request body must contain valid JSON.");
-  }
-}
-
 function createDemoServer(connect = (url, options) => new WebSocket(url, options), options = {}) {
   const config = options.config ?? readConfig();
-  const issueToken = options.issueToken ?? createTokenIssuer(config);
   const limits = { ...DEMO_LIMITS, ...options.limits };
   const logger = options.logger ?? console;
-  const now = options.now ?? Date.now;
-  let tokenWindow = 0;
-  let tokenCount = 0;
-  let issuing = 0;
   let activeRelays = 0;
   const origin = () => config.publicOrigin ?? `http://localhost:${server.address().port}`;
   const trusted = req => req.headers.host === new URL(origin()).host &&
@@ -71,8 +51,7 @@ function createDemoServer(connect = (url, options) => new WebSocket(url, options
   const json = (res, status, body) => {
     res.writeHead(status, {
       "Content-Type": "application/json; charset=utf-8",
-      "Cache-Control": "no-store",
-      ...(status === 429 ? { "Retry-After": "60" } : {})
+      "Cache-Control": "no-store"
     }).end(JSON.stringify(body));
   };
   const server = http.createServer(async (req, res) => {
@@ -92,55 +71,23 @@ function createDemoServer(connect = (url, options) => new WebSocket(url, options
       return;
     }
     if (url.pathname === "/api/realtime-access") {
-      if (req.method !== "POST") {
-        res.setHeader("Allow", "POST");
-        json(res, 405, { error: "Use POST for token issuance." });
+      json(res, 410, {
+        error: "Token issuance has moved to Azure Functions. Use the Function URL with x-functions-key; this endpoint does not redirect credentials.",
+        code: "function_issuer_required"
+      });
+      return;
+    }
+    if (url.pathname === "/api/demo-config") {
+      if (req.method !== "GET" && req.method !== "HEAD") {
+        res.setHeader("Allow", "GET, HEAD");
+        json(res, 405, { error: "Use GET for public demo configuration." });
         return;
       }
-      if (!trusted(req)) {
-        json(res, 403, { error: "Request origin or host is not allowed." });
+      if (!config.functionUrl) {
+        json(res, 503, { error: "No default Function URL is configured. Set FUNCTION_ACCESS_URL on the host or enter a Function URL in the page." });
         return;
       }
-      // x-functions-key preserves the standalone probe's existing request contract.
-      if (!keyMatches(req.headers["x-demo-key"] ?? req.headers["x-functions-key"], config.accessKey)) {
-        json(res, 401, { error: "A valid Demo access key is required." });
-        return;
-      }
-      if (!/^application\/json(?:;|$)/i.test(req.headers["content-type"] || "")) {
-        json(res, 415, { error: "Content-Type must be application/json." });
-        return;
-      }
-      if (now() - tokenWindow >= 60000) {
-        tokenWindow = now();
-        tokenCount = 0;
-      }
-      if (tokenCount >= limits.tokenRequests || issuing >= 2) {
-        json(res, 429, { error: "Demo token issuance limit reached. Retry later." });
-        return;
-      }
-      tokenCount++;
-      issuing++;
-      try {
-        if (Number(req.headers["content-length"]) > 16384) {
-          throw new AccessError(413, "body_too_large", "Request body exceeds 16 KiB.");
-        }
-        const body = await readJson(req);
-        json(res, 200, await issueToken(body, url.searchParams.get("transport")));
-      } catch (error) {
-        const known = error instanceof AccessError;
-        const code = known ? error.code : "internal_error";
-        logger.error("Realtime token request failed:", code);
-        if (known && error.status === 413) {
-          res.setHeader("Connection", "close");
-          res.once("finish", () => req.destroy());
-        }
-        if (!res.destroyed) json(res, known ? error.status : 500, {
-          error: known ? error.message : "Token issuance failed. Check server diagnostics.",
-          code
-        });
-      } finally {
-        issuing--;
-      }
+      json(res, 200, { function_url: config.functionUrl });
       return;
     }
     if (req.method !== "GET" && req.method !== "HEAD") {
@@ -294,7 +241,7 @@ if (require.main === module) {
   const server = createDemoServer();
   server.listen(port, process.env.WEBSITE_HOSTNAME ? "0.0.0.0" : "127.0.0.1", () => {
     console.log(`Realtime demos listening on port ${port}.`);
-    console.log("Token issuance and WebSocket relay enabled; credentials are not logged or stored.");
+    console.log("Pages and WebSocket relay enabled; Azure Functions issues tokens. Credentials are not logged or stored.");
   });
 }
 
