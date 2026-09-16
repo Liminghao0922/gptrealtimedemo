@@ -8,6 +8,12 @@ This sample contains:
   alternative token issuer. Existing Function and Static Web App deployments are
   not removed by the unified deployment.
 
+## Developer documentation (Japanese)
+
+- [Developer code guide](docs/developer-code-guide-ja.md): which implementations
+  and tests to reference when building a direct non-browser WebSocket client,
+  and which parts are specific to the browser demo or unified App Service host.
+
 ## Unified App Service demo
 
 Deployed entry point: **https://app-realtime-f1-mh0922.azurewebsites.net/**
@@ -88,10 +94,10 @@ not model availability; full audio verification is a separate step.
 ### Deploy the unified F1 app
 
 The separate `infra/appservice.bicep` and `scripts/deploy-appservice.ps1` path
-does not deploy the legacy `azure.yaml` Function/SWA configuration. Its defaults
-target subscription `a5095cf8-c1ec-4a7e-9ee7-22103870844b`, resource group
-`rg-pec-robotics`, Japan East, app `app-realtime-f1-mh0922` and plan
-`asp-realtime-f1-mh0922`. The existing Azure OpenAI account is unchanged.
+does not deploy the legacy `azure.yaml` Function/SWA configuration. The script
+pins the existing demo environment with `ValidateSet` restrictions; review its
+target settings before running it. It is not a general-purpose deployment script
+for arbitrary subscriptions. The existing Azure OpenAI account is unchanged.
 
 ```powershell
 # The script securely prompts for a 32-1024 character Demo key.
@@ -132,8 +138,8 @@ create that role assignment at the Azure OpenAI account scope.
   input transcription completed, the model completed its reply, and Stop ended
   microphone tracks. WebRTC inbound RTP increased by 33,538 and 28,736 bytes
   after the utterance; WebSocket received 890,400 bytes of output PCM audio.
-- All three transcribed the fixed Japanese WAV as
-  `ロボットの動作を確認してください。`. The livevoice page does not enable input ASR
+- All three transcriptions matched the fixed synthesized Japanese WAV.
+  The livevoice page does not enable input ASR
   by default; its test explicitly enabled `gpt-4o-mini-transcribe`. Map and
   WebSocket transcription settings remain available in their normal flows.
 - Offline regressions: **95 Node tests and 8 legacy Function tests passed**.
@@ -192,7 +198,7 @@ Update `api/local.settings.json`:
   "Values": {
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
     "FUNCTIONS_WORKER_RUNTIME": "python",
-    "AOAI_ENDPOINT": "https://aoai-realtime-test01.openai.azure.com/",
+    "AOAI_ENDPOINT": "https://<your-resource>.openai.azure.com/",
     "AOAI_REALTIME_DEPLOYMENT": "gpt-realtime-2.1-mini",
     "AOAI_API_KEY": "<optional-azure-openai-api-key>"
   }
@@ -298,12 +304,12 @@ in that Function's CORS settings. Do not place the Function key in source code.
 Run the offline relay, browser lifecycle, experiment-recording, and direct-client
 regression tests with `npm test` from `webapp`.
 
-## Customer verification: K1 Pro / Q1-Q12
+## Audio and protocol verification
 
 The WebSocket page includes a generic configurable preset and a transcription
 experiment panel. Existing WebRTC demos and the default WebSocket voice settings
 remain available. The browser relay is a convenient microphone test;
-the robot's server-to-server client does not require that relay or WebRTC.
+a server-to-server client does not require that relay or WebRTC.
 
 ### Try input transcription
 
@@ -315,7 +321,7 @@ the robot's server-to-server client does not require that relay or WebRTC.
    `interrupt_response: false`. The preset disables the initial greeting and
    simulates microphone gating during model response, playback, and 300 ms of
    echo tail. The manual input-pause checkbox independently stops microphone sending.
-   This is a simulation, not verification of the Booster audio SDK/hardware.
+   This is a simulation, not verification of device-specific audio SDKs or hardware.
 3. Speak a short Japanese sentence. Inspect **user input transcription** and
    **assistant speech captions** separately. Expand the configuration panel to
    compare the requested settings with the actual `session.updated` response.
@@ -344,16 +350,16 @@ Latency is measured at the client from speech-end/commit event receipt, not pure
 model execution time or an Azure SLA.
 
 The normal UI `session.update` does not attempt to change the Realtime model.
-The deployment is chosen by `AOAI_REALTIME_DEPLOYMENT` when the Function mints the
+The deployment is chosen by `AOAI_REALTIME_DEPLOYMENT` when the issuer mints the
 secret and by `model=` in the returned WebSocket URL. Use the direct compatibility
-probe to test the customer's exact payload including its `model` field.
+probe to test a payload including its `model` field.
 
-### Direct client: repeatable recording and customer probes
+### Direct client: repeatable audio and protocol probes
 
 [`webapp/customer-probe.cjs`](webapp/customer-probe.cjs) runs on Node.js 22+ with
 the existing `ws` dependency. It connects directly, without a browser, WebRTC, or
-the local relay. This exercises the robot's wire protocol, not its Python SDK,
-Jetson microphone driver, physical playback, or actual network environment.
+the local relay. This exercises the wire protocol, not a device-specific SDK,
+microphone driver, physical playback, or production network environment.
 
 Run these commands from the repository root. Supply credentials securely through
 environment variables, never command-line arguments or committed files:
@@ -380,24 +386,24 @@ node .\webapp\customer-probe.cjs transcribe-matrix --auth entra --omit-session-m
 `--auth api-key` instead uses `AOAI_API_KEY` with the same Azure endpoint and
 deployment. `auth-matrix` compares the separately supplied ephemeral, Entra, and
 API-key configurations; missing credentials are explicitly skipped, not substituted.
-When no Function is used, Function-only questions are marked skipped.
+When no token issuer is used, issuer-only checks are marked skipped.
 Direct Entra token acquisition/refresh belongs to the caller; this Node tool
 does not install an Azure identity SDK or refresh Entra tokens automatically.
 
-The default payload includes `session.model` **only as an exact Q7 compatibility
+The default payload includes `session.model` **only as a field-compatibility
 experiment**. Use `--omit-session-model` for the conventional update used by the
 browser page. These are separate runs; rejection never triggers a silent retry
 with a different payload. `--token-voice` / `--token-instructions` can differ from
 `--voice` / `--instructions` to compare issuance settings with the later update.
 
-Each run prints a redacted JSON report with Q1-Q12 evidence, requested/observed
+Each run prints a redacted JSON report with protocol evidence, requested/observed
 settings, HTTP/Upgrade status, structural event-contract checks, per-item
 transcripts, and independent input-ASR/assistant-response/assistant-audio outcomes.
 An ASR failure makes an audio probe fail even when assistant speech succeeds.
 The client sends the full recording and waits for all observed input items,
 including transcription that arrives after `response.done`.
 The CLI's upload is not suppressed during assistant output, unlike the optional
-K1 microphone-gating simulation in the browser.
+microphone-gating simulation in the browser.
 
 Add `--report <new-json-path>` to persist a report. Existing files are never
 overwritten. Reports contain spoken text, instructions and resource hostnames:
@@ -430,7 +436,7 @@ not a generic retry of 429 or a proof of what happens at expiry.
 `soak` opens idle sessions with mandatory opt-in, at most 3,600 seconds and four
 connections. It measures observed overlap, not the service's maximum.
 `network` checks only the configured Azure OpenAI host's DNS and TLS on port 443;
-`inspect` performs the authenticated WebSocket Upgrade. Repeat from the robot's
+`inspect` performs the authenticated WebSocket Upgrade. Repeat from the target
 network to validate its egress path.
 
 For TTS Entra auth, use `TTS_ENTRA_TOKEN` and `--tts-auth entra` instead.
@@ -444,21 +450,16 @@ recordings.
 
 ### Coverage and interpretation
 
-| Customer question | Executable verification / evidence | Do not infer |
+| Area | Executable verification / evidence | Validation boundary |
 | --- | --- | --- |
-| Q1 token kind | API contract test verifies `/openai/v1/realtime/client_secrets` and both token response shapes | The returned ephemeral secret is not the Function's Entra credential or an Azure API key |
-| Q2 WebSocket auth | Direct probe can test ephemeral Bearer, Entra Bearer, and API-key paths independently | WebRTC success alone does not prove ephemeral WebSocket acceptance |
-| Q2-1 URL conversion | Tests verify the resource WSS host, `/openai/v1/realtime`, URL-encoded `model`, and no Function `code` | Never replace `https` on the Function URL to manufacture an Azure OpenAI URL |
-| Q3 deployment / region | Record actual returned URL and deployment | Function location does not establish model location; a global deployment also does not promise inference residency |
-| Q4 POST contract / errors | Offline tests cover empty body (WebRTC default), WebSocket body, voice/instructions, 400/401/403/429/500/502 | Offline tests do not validate the deployed Function host's key enforcement or rate limits |
-| Q5 expiry / reconnect | Record returned expiry; direct reuse/reconnect/soak/concurrency probes are explicit experiments | No hard-coded two-hour TTL, token-reuse promise, maximum session time, or quota assertion |
-| Q6 issuance vs update | Test issuance voice/instructions; capture post-connect `session.updated` | Changing a control in the UI does not change an already-connected session; stop/reconnect |
-| Q7 audio / VAD / voice | Customer preset and exact GA configuration tests; direct 16-to-24 kHz WAV test | Browser audio does not validate Jetson drivers or acoustic echo handling |
-| Q8 transcribe | Off / Whisper / GPT / custom-deployment A/B; input delta/completed/failed and client timings | One accepted model ID does not establish deployment, permission, or quota rules for all resources |
-| Q9 events | Separate input/assistant correlation, late completion regression, event counts and direct event-shape checks | A greeting-only test does not test microphone input transcription or Server VAD |
-| Q10 Function key | Normalize pasted `?code=` into `x-functions-key`; reject conflicting keys; redacted exports | Local Functions host generally does not enforce deployed Function keys; rotation policy requires an operations decision |
-| Q11 network | Record distinct Function and Azure OpenAI hosts; direct network/Upgrade diagnostics | Browser CORS and robot egress are different controls; no broad network scans |
-| Q12 TTS | Separate opt-in direct TTS/MP3 probe with an explicit TTS deployment and separate Azure auth | Realtime ephemeral secrets must not be assumed to authorize `/audio/speech`; voice name alone does not identify a TTS deployment/version |
+| Authentication and endpoints | Verify client-secret response shapes, independent Bearer/API-key modes, Azure WSS host/path and encoded deployment | WebRTC success alone does not prove WebSocket acceptance. Never turn a Function URL into an Azure URL or forward its key |
+| Token API and access controls | Request/response/error contracts, key normalization, exact origin/host, issuance limits and redacted exports | Node and legacy Function contracts differ. Offline tests alone do not prove deployed host authentication |
+| Session configuration | Initial voice/instructions, observed `session.updated`, GA audio/VAD settings and deployment selection | UI changes need a new session unless explicitly sent. Issuer location does not establish model location or inference residency |
+| Audio transport and playback | Fixed WAV resampling from 16 to 24 kHz, paced upload, VAD/manual commit and microphone gating | Browser and file tests do not validate device drivers, acoustic echo handling or physical playback |
+| Transcription and events | Off / Whisper / GPT / custom-deployment A/B, input/assistant correlation, late completion and event-shape checks | A greeting or accepted configuration is not a transcription test. One deployment's success is not a universal permission or quota rule |
+| Lifecycle and capacity | Returned expiry, explicit reuse/reconnect/soak probes, bounded concurrency and playback-tail cleanup | No fixed TTL, token-reuse, maximum duration or service-capacity guarantee follows from these tests |
+| Networking | Distinct issuer/model hosts, single-host DNS/TLS and authenticated Upgrade diagnostics | Browser CORS and device egress are different controls. Run checks from the target network |
+| Separate TTS | Opt-in TTS/MP3 probe with explicit deployment and separate Azure auth | Realtime secrets must not be assumed to authorize `/audio/speech`; voice alone does not identify a TTS deployment/version |
 
 For the Function POST, use `Content-Type: application/json` and, when deployed,
 `x-functions-key: <Function key>`. A minimal WebSocket request is
@@ -477,7 +478,7 @@ resource/operations evidence; they are not established by a passing unit test.
 For direct Azure server connections, allow the configured Function and Azure
 OpenAI resource hosts over TCP 443, including WebSocket Upgrade to the latter.
 Entra authentication can require additional identity-provider endpoints.
-Validate any corporate proxy/DNS/TLS restrictions from the robot's actual network.
+Validate any corporate proxy/DNS/TLS restrictions from the target network.
 
 Run all offline tests from the repository root without contacting Azure:
 
@@ -486,9 +487,9 @@ npm --prefix .\webapp test
 .\api\.venv\Scripts\python.exe -m unittest discover -s .\api -p test_function_app.py -v
 ```
 
-Verification completed with **50 Node tests and 8 Function contract tests passing**.
-Browser lifecycle regressions also cover the 300 ms playback tail, robot-motion
-gating, fresh token issuance on manual reconnect, and disabled-ASR display.
+The latest offline test totals are listed in **Deployed verification** above.
+Browser lifecycle regressions also cover the 300 ms playback tail, manual input
+pause, fresh token issuance on manual reconnect, and disabled-ASR display.
 
 The optional VS Code task **realtime: local experiment server** serves the browser
 experiments on port `8123` instead of `8000` to avoid colliding with another demo.
@@ -497,24 +498,24 @@ If using this task, include `http://localhost:8123` in the Function CORS allowli
 ### Observed live results (2026-09-16)
 
 These are observations on the locally configured **`gpt-realtime-2.1-mini`**
-deployment, **not a certification of the customer's `gpt-realtime-2` deployment**:
+deployment, **not a certification of other deployments or model versions**:
 
 | Experiment | Observed result |
 | --- | --- |
 | Client secret issuance | Existing Function handler called Azure successfully (200); the returned secret had about 7,199 seconds remaining at observation |
 | Ephemeral WebSocket auth | The local relay connected to Azure using the ephemeral secret as Bearer authorization; no Function key was forwarded to the WebSocket URL |
-| Customer VAD / `coral` | `session.updated` confirmed the requested settings; audio, assistant captions, VAD and response completion events arrived |
+| Configured VAD / `coral` | `session.updated` confirmed the requested settings; audio, assistant captions, VAD and response completion events arrived |
 | `gpt-4o-mini-transcribe` before deployment | Configuration was accepted, but actual speech produced `conversation.item.input_audio_transcription.failed` with **`DeploymentNotFound`**; assistant speech still succeeded |
 | `whisper-1` | Input transcription succeeded and matched the short Japanese fixture; one run measured first/final text at **361 / 1,190 ms** after client receipt of the commit/speech-end event |
 | Transcription off | Observed configuration was `null`; assistant audio/captions still succeeded, with no input transcript events observed through that response's completion |
 | Direct Node + Entra, mini-transcribe before deployment | Same fixed 16 kHz WAV was resampled and uploaded directly; Upgrade 101 and configuration checks passed, ASR failed while assistant response/audio completed; report correctly marked the probe failed |
 | Direct Node + Entra, Whisper | Same fixed WAV succeeded: input ASR completed, assistant response/audio completed, CLI exited 0 |
-| Exact Q7 `session.model` field | A separate direct `inspect` run accepted the payload including the current deployment's model field; this configuration-only run did not test transcription or changing models |
+| Explicit `session.model` field | A separate direct `inspect` run accepted the payload including the current deployment's model field; this configuration-only run did not test transcription or changing models |
 | Mini-transcribe after deployment, 11:37 JST | Same direct Node + Entra probe and fixed WAV succeeded: `conversation.item.input_audio_transcription.completed` matched the fixture exactly, assistant response/audio completed, no event-contract issues, CLI exited 0 |
 
 This is why receiving `session.updated` is **not** enough to mark transcription
-as working. After the user deployed `gpt-4o-mini-transcribe` with that exact name
-in `aoai-robotics`, the first retest at 11:34 JST still returned
+as working. After a `gpt-4o-mini-transcribe` deployment was added with that exact
+name to the test resource, the first retest at 11:34 JST still returned
 `DeploymentNotFound`; the same test at 11:37 JST passed without changing the
 client configuration or falling back to Whisper. This is consistent with
 deployment propagation, but provisioning timestamps/control-plane diagnostics
@@ -525,9 +526,9 @@ permissions, or infer global deployment rules from this observation.
 
 The fixed test fixture [`assets/transcription-ja-16k.wav`](assets/transcription-ja-16k.wav)
 was generated locally with Windows speech synthesis, not recorded from a person.
-It is 16 kHz, mono, PCM16 and says **ロボットの動作を確認してください。**
+It is a short Japanese utterance in 16 kHz, mono, PCM16 format.
 Use it for repeatable resampling/transcription tests, then separately validate
-real robot recordings/noise. The first mini-model probe used a longer Japanese
+representative device recordings and noise. The first mini-model probe used a longer Japanese
 utterance; VAD plus half-duplex gating split it at a pause, so these runs are
 functional checks, not an accuracy or latency benchmark.
 
@@ -536,7 +537,7 @@ environment. Live browser checks therefore used a temporary loopback adapter
 calling the **existing Function handler in-process**, followed by the real local
 relay and Azure WebSocket. This proves neither deployed Function-key enforcement
 nor deployed CORS. Two-hour expiry/reuse behavior, long sessions, concurrent
-limits, robot-network access, custom Transcribe names, and TTS still require their
+limits, target-network access, custom Transcribe names, and TTS still require their
 explicit probes and the appropriate environment.
 
 Official references:
@@ -548,7 +549,7 @@ Official references:
 
 ## Deploy the Function to Azure
 
-The included AZD/Bicep infrastructure deploys a Python 3.14 Flex Consumption Function App, storage, monitoring, and a user-assigned managed identity. It also grants that identity **Cognitive Services User** on `aoai-realtime-test01`.
+The included AZD/Bicep infrastructure deploys a Python 3.14 Flex Consumption Function App, storage, monitoring, and a user-assigned managed identity. It also grants that identity **Cognitive Services User** on the configured Azure OpenAI resource.
 
 From the project root:
 
@@ -559,11 +560,9 @@ azd env select aoai-realtime-demo
 azd up
 ```
 
-The configured deployment target is:
-
-- Subscription: `ME-M365CPI16988021-minghaoli-1`
-- Region: Japan East
-- Resource group: `rg-aoai-realtime-demo-jpe`
+This legacy configuration targets an existing Japan East demo environment.
+Review the selected AZD environment and infrastructure parameters before deploying;
+do not assume the stored subscription and resource-group settings match your environment.
 
 After deployment, use the `SERVICE_API_URI` output followed by `/api/realtime-access` as the Function API URL in the demo page. Retrieve the `realtime-access` Function key from the Function App and enter it in the page.
 

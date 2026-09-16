@@ -5,3 +5,4 @@ api/local.settings.json
 *.py[cod]
 webapp/node_modules/
 .azure/*
+docs/customer-answers-ja.md
